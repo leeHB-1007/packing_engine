@@ -26,6 +26,7 @@ from repack_engine import (
     print_repack_final_plan,
 )
 from test_orders import get_test_case
+from sulu_med_exporter import export_engine_result_to_sulu_med_xlsx
 
 
 DEFAULT_MASTER = Path("data/packing_engine_normalized_masters_ko_json_schema_fixed.xlsx")
@@ -166,6 +167,21 @@ def main():
         box_eval_result=repack_box_result,
     )
     print_repack_final_plan(repack_final_result)
+
+    print("[STEP] Sulu Med 엑셀 export 시작")
+    export_result = export_engine_result_to_sulu_med_xlsx(
+        engine_result={
+            "match_result": matched_orders,
+            "fullbox_result": fullbox_result,
+            "repack_box_result": repack_box_result,
+            "final_result": repack_final_result,
+        },
+        output_path=Path("output") / f"{case_name}_sulu_med.xlsx",
+        title=f"Sulu Med 출하건 ({case_name})",
+        master_path=DEFAULT_MASTER,
+    )
+    print(f"[EXPORT] saved to {export_result['output_path']}")
+    print(f"[EXPORT] rows={export_result['row_count']} / issues={export_result['issue_count']}")
 
 
 if __name__ == "__main__":
