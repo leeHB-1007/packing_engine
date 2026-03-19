@@ -164,11 +164,14 @@ def _is_package_sealed(product: dict) -> bool:
     return policy == "PACKAGE_SEALED"
 
 
-def _can_use_mixed_fullbox(product: dict) -> bool:
+def _can_use_mixed_fullbox(product: dict, shipping_method: str = "auto") -> bool:
     if not product.get("혼합완박스허용여부", False):
         return False
 
-    if _is_package_product(product):
+    package_product = _is_package_product(product)
+    fullbox_mode = str(shipping_method or "").strip().lower() == "fullbox"
+
+    if package_product and not fullbox_mode:
         return False
 
     if _is_package_sealed(product):
@@ -177,14 +180,14 @@ def _can_use_mixed_fullbox(product: dict) -> bool:
     return True
 
 
-def _can_mix_fullbox(a: dict, b: dict, rules: dict) -> bool:
+def _can_mix_fullbox(a: dict, b: dict, rules: dict, shipping_method: str = "auto") -> bool:
     if not bool(rules.get("FULLBOX_MIX_ENABLE", True)):
         return False
 
-    if not _can_use_mixed_fullbox(a):
+    if not _can_use_mixed_fullbox(a, shipping_method=shipping_method):
         return False
 
-    if not _can_use_mixed_fullbox(b):
+    if not _can_use_mixed_fullbox(b, shipping_method=shipping_method):
         return False
 
     if not _same_fullbox_spec(a, b):
@@ -231,9 +234,13 @@ def _allocate_single_fullboxes(resolved_lines: List[dict]) -> Tuple[List[dict], 
     return resolved_lines, fullbox_allocations
 
 
-def _split_remainders_after_single(resolved_lines: List[dict]) -> Tuple[List[dict], List[dict]]:
+def _split_remainders_after_single(
+    resolved_lines: List[dict],
+    shipping_method: str = "auto",
+) -> Tuple[List[dict], List[dict]]:
     mix_candidates = []
     direct_repack = []
+    fullbox_mode = str(shipping_method or "").strip().lower() == "fullbox"
 
     for line in resolved_lines:
         product = line["product"]
@@ -251,7 +258,9 @@ def _split_remainders_after_single(resolved_lines: List[dict]) -> Tuple[List[dic
         package_sealed = _is_package_sealed(product)
 
         if not _is_fullbox_candidate(product):
-            if package_sealed:
+            if fullbox_mode:
+                payload["reason"] = "FULLBOX_MODE_NO_FULLBOX_SPEC_FALLBACK"
+            elif package_sealed:
                 payload["reason"] = "PACKAGE_SEALED_NO_FULLBOX_SPEC"
             elif package_flag:
                 payload["reason"] = "PACKAGE_PRODUCT_NO_FULLBOX_SPEC"
@@ -266,13 +275,16 @@ def _split_remainders_after_single(resolved_lines: List[dict]) -> Tuple[List[dic
             direct_repack.append(payload)
             continue
 
-        if package_flag:
+        if package_flag and not fullbox_mode:
             payload["reason"] = "PACKAGE_PRODUCT_REMAINDER_TO_REPACK"
             direct_repack.append(payload)
             continue
 
-        if not product.get("혼합완박스허용여부", False):
-            payload["reason"] = "FULLBOX_MIX_NOT_ALLOWED"
+        if not _can_use_mixed_fullbox(product, shipping_method=shipping_method):
+            if fullbox_mode and package_flag:
+                payload["reason"] = "FULLBOX_MODE_PACKAGE_MIX_NOT_ALLOWED"
+            else:
+                payload["reason"] = "FULLBOX_MIX_NOT_ALLOWED"
             direct_repack.append(payload)
             continue
 
@@ -344,7 +356,11 @@ def _allocate_group_mix_boxes(remainders: List[dict], rules: dict) -> Tuple[List
     return remaining, allocations
 
 
-def _allocate_tolerance_mix_boxes(remainders: List[dict], rules: dict) -> Tuple[List[dict], List[dict]]:
+def _allocate_tolerance_mix_boxes(
+    remainders: List[dict],
+    rules: dict,
+    shipping_method: str = "auto",
+) -> Tuple[List[dict], List[dict]]:
     allocations = []
 
     while True:
@@ -364,7 +380,7 @@ def _allocate_tolerance_mix_boxes(remainders: List[dict], rules: dict) -> Tuple[
             compatible = []
             for item in remainders:
                 p = item["product"]
-                if _can_mix_fullbox(seed_product, p, rules):
+                if _can_mix_fullbox(seed_product, p, rules, shipping_method=shipping_method):
                     compatible.append(item)
 
             total_compatible_qty = sum(int(x["qty"]) for x in compatible)
@@ -472,6 +488,7 @@ def run_fullbox_engine(
     prepared_products_df: pd.DataFrame,
     rules: dict,
     fallback_fullboxes_df: pd.DataFrame | None = None,
+    shipping_method: str = "auto",
 ) -> Dict[str, List[dict]]:
     resolved_result = resolve_orders(
         order_lines=order_lines,
@@ -483,10 +500,17 @@ def run_fullbox_engine(
 
     resolved_lines, single_allocations = _allocate_single_fullboxes(resolved_lines)
 
-    mix_candidates, direct_repack = _split_remainders_after_single(resolved_lines)
+    mix_candidates, direct_repack = _split_remainders_after_single(
+        resolved_lines,
+        shipping_method=shipping_method,
+    )
 
     mix_candidates, group_mix_allocations = _allocate_group_mix_boxes(mix_candidates, rules)
-    mix_candidates, tol_mix_allocations = _allocate_tolerance_mix_boxes(mix_candidates, rules)
+    mix_candidates, tol_mix_allocations = _allocate_tolerance_mix_boxes(
+        mix_candidates,
+        rules,
+        shipping_method=shipping_method,
+    )
 
     for item in mix_candidates:
         if int(item["qty"]) > 0 and not item.get("reason"):

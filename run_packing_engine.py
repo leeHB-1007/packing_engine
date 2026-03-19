@@ -235,6 +235,7 @@ def run_packing_engine(
             prepared_products_df=prepared_products,
             rules=load_result["rules"],
             fallback_fullboxes_df=load_result["fullboxes"],
+            shipping_method=shipping_method,
         )
         fullbox_result["not_found"] = fullbox_result.get("not_found", []) + extra_not_found
 
