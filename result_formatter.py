@@ -217,6 +217,9 @@ def _collect_rows(result: Dict[str, Any]) -> List[Dict[str, Any]]:
 
                 row_box_code = box.get("box_code", box_code)
                 row_box_name = box.get("box_name", box_name)
+                row_outer_dims = box.get("outer_size_cm", outer_dims)
+                row_inner_dims = box.get("inner_size_cm", inner_dims)
+                row_orientation = box.get("best_orientation", recommended_rotation)
 
                 if row_box_name and row_box_code:
                     row_box_label = f"{row_box_name} ({row_box_code})"
@@ -247,11 +250,11 @@ def _collect_rows(result: Dict[str, Any]) -> List[Dict[str, Any]]:
                         "post_cut_inner_height": box.get("trimmed_inner_height_cm"),
                         "max_capacity": max_capacity,
                         "recommended_capacity": recommended_capacity,
-                        "recommended_rotation": recommended_rotation,
+                        "recommended_rotation": row_orientation,
                         "max_rotation": max_rotation,
                         "spec_source": spec_source,
-                        "outer_dims": outer_dims,
-                        "inner_dims": inner_dims,
+                        "outer_dims": row_outer_dims,
+                        "inner_dims": row_inner_dims,
                     }
                 )
         else:

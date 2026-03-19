@@ -1097,6 +1097,7 @@ def _calc_best_orientation_fit(*args, **kwargs):
         item = args[1]
         qty = args[2] if len(args) >= 3 else None
         rules = args[3] if len(args) >= 4 and isinstance(args[3], dict) else {}
+        keep_height_cm = _resolve_trim_keep_height_cm(rules)
 
         item_spec_cm = _extract_item_spec_cm(item)
         box_inner_cm = _extract_box_inner_cm(box)
@@ -1137,7 +1138,7 @@ def _calc_best_orientation_fit(*args, **kwargs):
                 outer_size_cm=outer_size_cm,
                 orientation=global_best_orientation,
                 item_qty=first_box_qty,
-                keep_height_cm=2.0,
+                keep_height_cm=keep_height_cm,
             )
 
             boxes_needed = math.ceil(qty / recommended_max_units_per_box) if qty is not None else None
@@ -1191,6 +1192,17 @@ def _resolve_primary_large_box_code(boxes: List[dict], rules: dict) -> str:
         ),
     )
     return _norm_text(largest_box.get("박스코드", ""))
+
+
+def _resolve_trim_keep_height_cm(rules: dict | None) -> float:
+    if not isinstance(rules, dict):
+        return 3.0
+    value = rules.get("REPACK_TRIM_KEEP_HEIGHT_CM", 3.0)
+    try:
+        keep_height = float(value)
+    except Exception:
+        keep_height = 3.0
+    return max(0.0, keep_height)
 
 
 def evaluate_repack_box_candidates(
@@ -1352,19 +1364,101 @@ def evaluate_repack_box_candidates(
     }
 
 
+def _build_box_line_from_candidate(
+    candidate: dict,
+    item_qty: int,
+    box_no: int,
+    keep_height_cm: float,
+) -> dict:
+    gross_weight = candidate["box_weight_kg"] + (item_qty * candidate["unit_weight_kg"])
+    trim_info = _calc_trim_info(
+        inner_size_cm=candidate["inner_size_cm"],
+        outer_size_cm=candidate["outer_size_cm"],
+        orientation=candidate["best_orientation"],
+        item_qty=item_qty,
+        keep_height_cm=keep_height_cm,
+    )
+
+    return {
+        "box_no": box_no,
+        "box_code": candidate["box_code"],
+        "box_name": candidate["box_name"],
+        "qty": item_qty,
+        "gross_weight_est": round(gross_weight, 3),
+        "layer_capacity": trim_info["layer_capacity"],
+        "layers_needed": trim_info["layers_needed"],
+        "used_height_cm": trim_info["used_height_cm"],
+        "remaining_height_cm": trim_info["remaining_height_cm"],
+        "trim_cut_height_cm": trim_info["trim_cut_height_cm"],
+        "trimmed_inner_height_cm": trim_info["trimmed_inner_height_cm"],
+        "trimmed_outer_height_cm": trim_info["trimmed_outer_height_cm"],
+        "outer_size_cm": candidate["outer_size_cm"],
+        "inner_size_cm": candidate["inner_size_cm"],
+        "best_orientation": candidate["best_orientation"],
+    }
+
+
+def _select_repack_candidate_for_qty(
+    candidates: List[dict],
+    qty: int,
+    keep_height_cm: float,
+) -> dict | None:
+    if qty <= 0:
+        return None
+
+    ranked = []
+    for candidate in candidates or []:
+        cap = int(candidate.get("max_units_per_box", 0) or 0)
+        if cap <= 0:
+            continue
+
+        boxes_needed = int(math.ceil(qty / cap))
+        first_box_qty = min(qty, cap)
+        trim_info = _calc_trim_info(
+            inner_size_cm=candidate["inner_size_cm"],
+            outer_size_cm=candidate["outer_size_cm"],
+            orientation=candidate["best_orientation"],
+            item_qty=first_box_qty,
+            keep_height_cm=keep_height_cm,
+        )
+
+        ranked.append(
+            (
+                (
+                    boxes_needed,
+                    candidate["inner_volume_cm3"],
+                    -trim_info["trim_cut_height_cm"],
+                    -candidate["estimated_fill_ratio_first_box"],
+                    candidate["box_priority"],
+                ),
+                candidate,
+            )
+        )
+
+    if not ranked:
+        return None
+
+    ranked.sort(key=lambda item: item[0])
+    return ranked[0][1]
+
+
 def build_repack_final_plan(
     box_eval_result: Dict[str, List[dict]],
+    rules: dict | None = None,
 ) -> Dict[str, List[dict]]:
     final_plans = []
+    keep_height_cm = _resolve_trim_keep_height_cm(rules)
 
     for row in box_eval_result.get("box_candidates", []):
         rec = row["recommended_box"]
+        all_candidates = row.get("all_box_candidates", []) or []
 
         product_name = row["product_name"]
         qty = int(row["qty"])
         original_qty = int(row.get("original_qty", qty))
         package_pack_qty = int(row.get("package_pack_qty", 1))
         calc_unit_type = _norm_text(row.get("calc_unit_type", "item"))
+        is_bulk_case = bool(row.get("is_bulk_case", False))
 
         per_box = int(rec["max_units_per_box"])
 
@@ -1372,40 +1466,58 @@ def build_repack_final_plan(
             continue
 
         box_lines = []
-
         remaining_qty = qty
         box_no = 1
+        primary_candidate = rec
+        primary_cap = int(primary_candidate.get("max_units_per_box", 0) or 0)
 
-        while remaining_qty > 0:
-            item_qty = min(remaining_qty, per_box)
-            remaining_qty -= item_qty
+        if is_bulk_case and primary_cap > 0 and remaining_qty >= primary_cap:
+            full_primary_boxes = remaining_qty // primary_cap
+            for _ in range(full_primary_boxes):
+                box_lines.append(
+                    _build_box_line_from_candidate(
+                        primary_candidate,
+                        primary_cap,
+                        box_no,
+                        keep_height_cm,
+                    )
+                )
+                remaining_qty -= primary_cap
+                box_no += 1
 
-            gross_weight = rec["box_weight_kg"] + (item_qty * rec["unit_weight_kg"])
-            trim_info = _calc_trim_info(
-                inner_size_cm=rec["inner_size_cm"],
-                outer_size_cm=rec["outer_size_cm"],
-                orientation=rec["best_orientation"],
-                item_qty=item_qty,
-                keep_height_cm=2.0,
-            )
+        if remaining_qty > 0:
+            remainder_candidate = _select_repack_candidate_for_qty(
+                all_candidates or [rec],
+                remaining_qty,
+                keep_height_cm,
+            ) or rec
 
-            box_lines.append(
-                {
-                    "box_no": box_no,
-                    "box_code": rec["box_code"],
-                    "box_name": rec["box_name"],
-                    "qty": item_qty,
-                    "gross_weight_est": round(gross_weight, 3),
-                    "layer_capacity": trim_info["layer_capacity"],
-                    "layers_needed": trim_info["layers_needed"],
-                    "used_height_cm": trim_info["used_height_cm"],
-                    "remaining_height_cm": trim_info["remaining_height_cm"],
-                    "trim_cut_height_cm": trim_info["trim_cut_height_cm"],
-                    "trimmed_inner_height_cm": trim_info["trimmed_inner_height_cm"],
-                    "trimmed_outer_height_cm": trim_info["trimmed_outer_height_cm"],
-                }
-            )
-            box_no += 1
+            remainder_cap = int(remainder_candidate.get("max_units_per_box", 0) or 0)
+            if remainder_cap > 0:
+                while remaining_qty > 0:
+                    item_qty = min(remaining_qty, remainder_cap)
+                    box_lines.append(
+                        _build_box_line_from_candidate(
+                            remainder_candidate,
+                            item_qty,
+                            box_no,
+                            keep_height_cm,
+                        )
+                    )
+                    remaining_qty -= item_qty
+                    box_no += 1
+
+        first_box = box_lines[0] if box_lines else None
+        selected_box_code = first_box.get("box_code") if first_box else rec["box_code"]
+        selected_box_name = first_box.get("box_name") if first_box else rec["box_name"]
+        selected_outer_size_cm = first_box.get("outer_size_cm") if first_box else rec["outer_size_cm"]
+        selected_inner_size_cm = first_box.get("inner_size_cm") if first_box else rec["inner_size_cm"]
+        selected_orientation = first_box.get("best_orientation") if first_box else rec["best_orientation"]
+
+        selection_policy = rec.get("selection_policy", "")
+        box_codes_in_plan = {str(line.get("box_code", "") or "").strip() for line in box_lines}
+        if len(box_codes_in_plan) > 1:
+            selection_policy = "PRIMARY_BIG_BOX_THEN_OPTIMAL_REMAINDER"
 
         final_plans.append(
             {
@@ -1414,15 +1526,15 @@ def build_repack_final_plan(
                 "original_qty": original_qty,
                 "package_pack_qty": package_pack_qty,
                 "calc_unit_type": calc_unit_type,
-                "selected_box_code": rec["box_code"],
-                "selected_box_name": rec["box_name"],
-                "units_per_box": rec["max_units_per_box"],
+                "selected_box_code": selected_box_code,
+                "selected_box_name": selected_box_name,
+                "units_per_box": int(rec["max_units_per_box"]),
                 "boxes_needed": len(box_lines),
-                "inner_size_cm": rec["inner_size_cm"],
-                "outer_size_cm": rec["outer_size_cm"],
-                "best_orientation": rec["best_orientation"],
+                "inner_size_cm": selected_inner_size_cm,
+                "outer_size_cm": selected_outer_size_cm,
+                "best_orientation": selected_orientation,
                 "spec_source": rec.get("spec_source", ""),
-                "selection_policy": rec.get("selection_policy", ""),
+                "selection_policy": selection_policy,
                 "global_best_max_units_per_box": rec.get("global_best_max_units_per_box", rec["max_units_per_box"]),
                 "global_best_orientation": rec.get("global_best_orientation"),
                 "box_lines": box_lines,

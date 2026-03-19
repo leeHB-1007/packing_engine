@@ -318,7 +318,6 @@ def _build_repack_groups(
         product_name = str(plan.get("product_name", "") or "").strip()
         package_pack_qty = _to_int(plan.get("package_pack_qty"), 1)
         calc_unit_type = _normalize_calc_unit(plan.get("calc_unit_type"))
-        outer_size_cm = plan.get("outer_size_cm", ())
 
         for box_line in plan.get("box_lines", []) or []:
             box_qty = _to_int(box_line.get("qty"), 0)
@@ -333,7 +332,7 @@ def _build_repack_groups(
                 packing_unit = box_qty
 
             box_size_cm = _format_box_size(
-                outer_size_cm,
+                box_line.get("outer_size_cm", plan.get("outer_size_cm", ())),
                 box_line.get("trimmed_outer_height_cm"),
             )
 

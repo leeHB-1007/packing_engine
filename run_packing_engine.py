@@ -254,6 +254,7 @@ def run_packing_engine(
 
     final_result = build_repack_final_plan(
         box_eval_result=repack_box_result,
+        rules=load_result["rules"],
     )
 
     final_result["not_found"] = fullbox_result.get("not_found", [])
