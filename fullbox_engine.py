@@ -75,6 +75,53 @@ def _build_product_lookup(prepared_products_df: pd.DataFrame) -> Dict[str, dict]
     return lookup
 
 
+def _build_fullbox_only_lookup(fullboxes_df: pd.DataFrame | None) -> Dict[str, dict]:
+    if fullboxes_df is None or len(fullboxes_df) == 0:
+        return {}
+
+    df = fullboxes_df.copy()
+    lookup = {}
+
+    for _, row in df.iterrows():
+        name = _norm_text(row.get(_norm_col("국문상품명"), ""))
+        if not name:
+            continue
+
+        fullbox_pack = int(_to_float(row.get(_norm_col("완박스입수량"), 0)))
+        fullbox_weight = _to_float(row.get(_norm_col("완박스중량(kg)"), 0))
+
+        lookup[name] = {
+            "상품코드": _norm_text(row.get(_norm_col("상품코드"), "")),
+            "국문상품명": name,
+            "가로(cm)": _to_float(row.get(_norm_col("완박스가로(cm)"), 0)),
+            "세로(cm)": _to_float(row.get(_norm_col("완박스세로(cm)"), 0)),
+            "높이(cm)": _to_float(row.get(_norm_col("완박스높이(cm)"), 0)),
+            "개당중량(kg)": fullbox_weight,
+            "완박스입수량": fullbox_pack,
+            "완박스박스코드": _norm_text(row.get(_norm_col("완박스박스코드"), "")),
+            "완박스박스명": _norm_text(row.get(_norm_col("완박스박스명"), "")),
+            "혼합완박스허용여부": _to_bool(row.get(_norm_col("혼합완박스허용여부"), False)),
+            "완박스혼합그룹": _norm_text(row.get(_norm_col("완박스혼합그룹"), "")),
+            "패킹정책코드": "",
+            "패키지상품여부": False,
+            "패키지정책참조": "",
+        }
+
+    return lookup
+
+
+def _build_resolve_lookup(
+    prepared_products_df: pd.DataFrame,
+    fallback_fullboxes_df: pd.DataFrame | None = None,
+) -> Dict[str, dict]:
+    lookup = _build_product_lookup(prepared_products_df)
+
+    for name, payload in _build_fullbox_only_lookup(fallback_fullboxes_df).items():
+        lookup.setdefault(name, payload)
+
+    return lookup
+
+
 def _is_fullbox_candidate(product: dict) -> bool:
     return (
         product.get("완박스입수량", 0) > 0
@@ -382,8 +429,12 @@ def _build_repack_or_failed(remainders: List[dict], rules: dict) -> List[dict]:
     return result
 
 
-def resolve_orders(order_lines: List[OrderLine], prepared_products_df: pd.DataFrame) -> Dict[str, List[dict]]:
-    lookup = _build_product_lookup(prepared_products_df)
+def resolve_orders(
+    order_lines: List[OrderLine],
+    prepared_products_df: pd.DataFrame,
+    fallback_fullboxes_df: pd.DataFrame | None = None,
+) -> Dict[str, List[dict]]:
+    lookup = _build_resolve_lookup(prepared_products_df, fallback_fullboxes_df)
 
     resolved = []
     not_found = []
@@ -420,8 +471,13 @@ def run_fullbox_engine(
     order_lines: List[OrderLine],
     prepared_products_df: pd.DataFrame,
     rules: dict,
+    fallback_fullboxes_df: pd.DataFrame | None = None,
 ) -> Dict[str, List[dict]]:
-    resolved_result = resolve_orders(order_lines, prepared_products_df)
+    resolved_result = resolve_orders(
+        order_lines=order_lines,
+        prepared_products_df=prepared_products_df,
+        fallback_fullboxes_df=fallback_fullboxes_df,
+    )
     resolved_lines = resolved_result["resolved_lines"]
     not_found = resolved_result["not_found"]
 

@@ -123,7 +123,9 @@ def _normalize_order_lines(order_lines: List[Any]) -> List[RawOrderLine]:
 
     for idx, item in enumerate(order_lines, start=1):
         if isinstance(item, RawOrderLine):
-            product_name = str(item.input_name).strip()
+            product_name = str(
+                getattr(item, "item_text", getattr(item, "raw_text", ""))
+            ).strip()
             qty = int(item.qty)
 
         elif isinstance(item, dict):
@@ -254,9 +256,9 @@ def _build_forced_remainder_result(matched_orders: List[Any]) -> Dict[str, List[
         else:
             not_found.append(
                 {
-                    "product_name": getattr(row, "input_name", None),
+                    "product_name": getattr(row, "item_text", getattr(row, "raw_input", None)),
                     "qty": getattr(row, "qty", None),
-                    "reason": getattr(row, "reason", None) or "PRODUCT_NOT_FOUND",
+                    "reason": getattr(row, "message", None) or "PRODUCT_NOT_FOUND",
                 }
             )
 
@@ -730,7 +732,12 @@ def run_fixed_box_check(
         outer_size_cm=outer_size_cm,
     )
 
-    matched_orders = match_order_lines(raw_orders, prepared_products)
+    matched_orders = match_order_lines(
+        raw_order_lines=raw_orders,
+        prepared_products=prepared_products,
+        fullboxes_master=load_result["fullboxes"],
+        packages_master=load_result["packages"],
+    )
 
     forced_remainder_result = _build_forced_remainder_result(matched_orders)
 

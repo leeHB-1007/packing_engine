@@ -388,7 +388,12 @@ def run_fixed_box_mix_check(
         outer_size_cm=outer_size_cm,
     )
 
-    matched_orders = match_order_lines(raw_orders, prepared_products)
+    matched_orders = match_order_lines(
+        raw_order_lines=raw_orders,
+        prepared_products=prepared_products,
+        fullboxes_master=load_result["fullboxes"],
+        packages_master=load_result["packages"],
+    )
     forced_remainder_result = _build_forced_remainder_result(matched_orders)
 
     repack_result = build_repack_candidates(

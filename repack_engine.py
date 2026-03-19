@@ -1192,12 +1192,17 @@ def evaluate_repack_box_candidates(
             recommended_units_by_space = int(fit_info["recommended_units_by_space"])
             units_by_weight = int(fit_info["units_by_weight"])
             recommended_max_units = int(fit_info["recommended_max_units_per_box"])
-            boxes_needed = int(fit_info["boxes_needed"])
             orientation = fit_info["best_orientation"]
             trim_info_first_box = fit_info["trim_info_first_box"]
 
             if recommended_max_units <= 0 or orientation is None:
                 continue
+
+            boxes_needed_raw = fit_info.get("boxes_needed")
+            if boxes_needed_raw in (None, ""):
+                continue
+
+            boxes_needed = int(boxes_needed_raw)
 
             inner_l = float(box["내경가로(cm)"])
             inner_w = float(box["내경세로(cm)"])

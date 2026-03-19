@@ -142,6 +142,7 @@ def main():
             order_lines=engine_orders,
             prepared_products_df=prepared_products,
             rules=load_result["rules"],
+            fallback_fullboxes_df=load_result["fullboxes"],
         )
         fullbox_result["not_found"] = fullbox_result.get("not_found", []) + extra_not_found
 

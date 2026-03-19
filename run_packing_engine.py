@@ -52,7 +52,9 @@ def _normalize_order_lines(order_lines: List[Any]) -> List[RawOrderLine]:
 
     for idx, item in enumerate(order_lines, start=1):
         if isinstance(item, RawOrderLine):
-            product_name = str(item.input_name).strip()
+            product_name = str(
+                getattr(item, "item_text", getattr(item, "raw_text", ""))
+            ).strip()
             qty = int(item.qty)
 
         elif isinstance(item, dict):
@@ -97,16 +99,18 @@ def _serialize_match_results(matched_orders: List[Any]) -> List[Dict[str, Any]]:
 
     for row in matched_orders:
         payload = {
-            "input_name": getattr(row, "input_name", None),
+            "raw_input": getattr(row, "raw_input", None),
+            "item_text": getattr(row, "item_text", None),
+            "input_name": getattr(row, "item_text", getattr(row, "raw_input", None)),
             "qty": getattr(row, "qty", None),
+            "status": getattr(row, "status", None),
+            "message": getattr(row, "message", None),
             "matched": getattr(row, "matched", None),
             "matched_name": getattr(row, "matched_name", None),
             "product_code": getattr(row, "product_code", None),
-            "package_product": getattr(row, "package_product", None),
-            "package_policy_ref": getattr(row, "package_policy_ref", None),
-            "packing_policy_code": getattr(row, "packing_policy_code", None),
-            "special_group": getattr(row, "special_group", None),
-            "reason": getattr(row, "reason", None),
+            "match_source": getattr(row, "match_source", None),
+            "match_reason": getattr(row, "match_reason", None),
+            "reason": getattr(row, "match_reason", None) or getattr(row, "message", None),
         }
         results.append(payload)
 
@@ -155,7 +159,12 @@ def run_packing_engine(
         load_result["packages"],
     )
 
-    matched_orders = match_order_lines(raw_orders, prepared_products)
+    matched_orders = match_order_lines(
+        raw_order_lines=raw_orders,
+        prepared_products=prepared_products,
+        fullboxes_master=load_result["fullboxes"],
+        packages_master=load_result["packages"],
+    )
 
     engine_orders: List[OrderLine] = []
     extra_not_found: List[Dict[str, Any]] = []
@@ -171,9 +180,9 @@ def run_packing_engine(
         else:
             extra_not_found.append(
                 {
-                    "product_name": getattr(row, "input_name", None),
+                    "product_name": getattr(row, "item_text", getattr(row, "raw_input", None)),
                     "qty": getattr(row, "qty", None),
-                    "reason": getattr(row, "reason", None) or "PRODUCT_NOT_FOUND",
+                    "reason": getattr(row, "message", None) or "PRODUCT_NOT_FOUND",
                 }
             )
 
@@ -181,6 +190,7 @@ def run_packing_engine(
         order_lines=engine_orders,
         prepared_products_df=prepared_products,
         rules=load_result["rules"],
+        fallback_fullboxes_df=load_result["fullboxes"],
     )
 
     fullbox_result["not_found"] = fullbox_result.get("not_found", []) + extra_not_found
