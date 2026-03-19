@@ -318,6 +318,7 @@ def _build_repack_groups(
         product_name = str(plan.get("product_name", "") or "").strip()
         package_pack_qty = _to_int(plan.get("package_pack_qty"), 1)
         calc_unit_type = _normalize_calc_unit(plan.get("calc_unit_type"))
+        plan_note = str(plan.get("note", "") or "").strip()
 
         for box_line in plan.get("box_lines", []) or []:
             box_qty = _to_int(box_line.get("qty"), 0)
@@ -351,7 +352,7 @@ def _build_repack_groups(
                             packing_unit=packing_unit,
                         )
                     ],
-                    note="",
+                    note=str(box_line.get("note", "") or plan_note),
                 )
             )
             next_box_no += 1

@@ -248,6 +248,7 @@ def _collect_rows(result: Dict[str, Any]) -> List[Dict[str, Any]]:
                         "cut_height": box.get("trim_cut_height_cm"),
                         "post_cut_outer_height": box.get("trimmed_outer_height_cm"),
                         "post_cut_inner_height": box.get("trimmed_inner_height_cm"),
+                        "note": box.get("note", plan.get("note", "")),
                         "max_capacity": max_capacity,
                         "recommended_capacity": recommended_capacity,
                         "recommended_rotation": row_orientation,
@@ -269,18 +270,19 @@ def _collect_rows(result: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "calc_unit": calc_unit,
                     "package_in_qty": package_in_qty,
                     "estimated_weight": None,
-                    "per_layer": None,
-                    "layers": None,
-                    "used_height": None,
-                    "remaining_height": None,
-                    "cut_height": None,
-                    "post_cut_outer_height": None,
-                    "post_cut_inner_height": None,
-                    "max_capacity": max_capacity,
-                    "recommended_capacity": recommended_capacity,
-                    "recommended_rotation": recommended_rotation,
-                    "max_rotation": max_rotation,
-                    "spec_source": spec_source,
+                "per_layer": None,
+                "layers": None,
+                "used_height": None,
+                "remaining_height": None,
+                "cut_height": None,
+                "post_cut_outer_height": None,
+                "post_cut_inner_height": None,
+                "note": plan.get("note", ""),
+                "max_capacity": max_capacity,
+                "recommended_capacity": recommended_capacity,
+                "recommended_rotation": recommended_rotation,
+                "max_rotation": max_rotation,
+                "spec_source": spec_source,
                     "outer_dims": outer_dims,
                     "inner_dims": inner_dims,
                 }
@@ -333,6 +335,10 @@ def _format_final_only(rows: List[Dict[str, Any]]) -> List[str]:
         if est_weight not in (None, ""):
             parts.append(f"{_fmt_weight(est_weight)} kg")
 
+        note = str(row.get("note", "") or "").strip()
+        if note:
+            parts.append(note)
+
         lines.append(f"{idx}. " + " / ".join(parts))
 
     return lines
@@ -376,6 +382,10 @@ def _format_packing_list(rows: List[Dict[str, Any]]) -> List[str]:
 
         if row.get("estimated_weight") not in (None, ""):
             lines.append(f"- 예상총중량: {_fmt_weight(row.get('estimated_weight'))} kg")
+
+        note = str(row.get("note", "") or "").strip()
+        if note:
+            lines.append(f"- 비고: {note}")
 
         if _is_positive_number(row.get("per_layer")):
             lines.append(f"- 층당적재: {_fmt_qty(row.get('per_layer'))}")

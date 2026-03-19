@@ -79,6 +79,7 @@ class RepackCandidate:
     packing_policy_code: str
     source_reason: str
     spec_source: str
+    candidate_note: str = ""
 
 
 def _build_product_lookup(prepared_products_df: pd.DataFrame) -> Dict[str, dict]:
@@ -211,16 +212,36 @@ def _has_valid_package_spec(package_spec: dict | None) -> bool:
 
 
 def _should_use_package_spec(product: dict, package_spec: dict | None) -> bool:
-    if not bool(product.get("패키지상품여부", False)):
-        return False
-
     if not _has_valid_package_spec(package_spec):
         return False
 
+    package_flag = bool(product.get("패키지상품여부", False))
     packing_policy = _norm_text(product.get("패킹정책코드", "")).upper()
     source_ref = _norm_text(product.get("패키지정책참조", ""))
 
-    return packing_policy.startswith("PACKAGE_") or source_ref != ""
+    return package_flag or packing_policy.startswith("PACKAGE_") or source_ref != ""
+
+
+def _build_candidate_note(source_reason: str, candidate_kind: str) -> str:
+    reason = _norm_text(source_reason).upper()
+    kind = _norm_text(candidate_kind).lower()
+
+    if kind == "package_unit":
+        return "패키지 기준 포장"
+    if kind == "package_remainder_item":
+        return "패키지 잔량 낱개 포장"
+
+    reason_map = {
+        "FULLBOX_MODE_NO_FULLBOX_SPEC_FALLBACK": "완박스 스펙 없음 -> 재포장",
+        "FULLBOX_MODE_PACKAGE_MIX_NOT_ALLOWED": "완박스 예외 미허용 -> 재포장",
+        "PACKAGE_PRODUCT_REMAINDER_TO_REPACK": "패키지 상품 잔량 재포장",
+        "PACKAGE_SEALED_REMAINDER_TO_REPACK": "패키지 밀봉 잔량 재포장",
+        "FULLBOX_MIX_NOT_ALLOWED": "혼합완박스 불가 -> 재포장",
+        "FULLBOX_MIX_REMAINDER": "완박스 잔량 재포장",
+        "NO_FULLBOX_SPEC": "완박스 스펙 없음 -> 재포장",
+        "FORCED_REPACK": "재포장 지정",
+    }
+    return reason_map.get(reason, "")
 
 
 def _build_box_lookup(prepared_boxes_df: pd.DataFrame) -> List[dict]:
@@ -356,6 +377,7 @@ def build_repack_candidates(
                             packing_policy_code=product["패킹정책코드"],
                             source_reason=reason,
                             spec_source="packages_master",
+                            candidate_note=_build_candidate_note(reason, "package_unit"),
                         )
                     )
 
@@ -398,6 +420,7 @@ def build_repack_candidates(
                             packing_policy_code=product["패킹정책코드"],
                             source_reason=reason,
                             spec_source="products_master",
+                            candidate_note=_build_candidate_note(reason, "package_remainder_item"),
                         )
                     )
 
@@ -470,6 +493,7 @@ def build_repack_candidates(
                 packing_policy_code=product["패킹정책코드"],
                 source_reason=reason,
                 spec_source=spec_source,
+                candidate_note=_build_candidate_note(reason, "item"),
             )
         )
 
@@ -1289,6 +1313,7 @@ def evaluate_repack_box_candidates(
                     "unit_weight_kg": float(item["unit_weight_kg"]),
                     "estimated_fill_ratio_first_box": estimated_fill_ratio_first_box,
                     "source_reason": item["source_reason"],
+                    "candidate_note": item.get("candidate_note", ""),
                     "spec_source": item.get("spec_source", ""),
                     "first_box_trim_info": trim_info_first_box,
                     "global_best_units_by_space": global_best_units_by_space,
@@ -1351,6 +1376,7 @@ def evaluate_repack_box_candidates(
                 "package_pack_qty": item.get("package_pack_qty", 1),
                 "calc_unit_type": item.get("calc_unit_type", "item"),
                 "is_bulk_case": is_bulk_case,
+                "candidate_note": item.get("candidate_note", ""),
                 "recommended_box": selected_recommended_box,
                 "all_box_candidates": per_box_results,
             }
@@ -1369,6 +1395,7 @@ def _build_box_line_from_candidate(
     item_qty: int,
     box_no: int,
     keep_height_cm: float,
+    note: str = "",
 ) -> dict:
     gross_weight = candidate["box_weight_kg"] + (item_qty * candidate["unit_weight_kg"])
     trim_info = _calc_trim_info(
@@ -1395,6 +1422,7 @@ def _build_box_line_from_candidate(
         "outer_size_cm": candidate["outer_size_cm"],
         "inner_size_cm": candidate["inner_size_cm"],
         "best_orientation": candidate["best_orientation"],
+        "note": str(note or "").strip(),
     }
 
 
@@ -1459,6 +1487,7 @@ def build_repack_final_plan(
         package_pack_qty = int(row.get("package_pack_qty", 1))
         calc_unit_type = _norm_text(row.get("calc_unit_type", "item"))
         is_bulk_case = bool(row.get("is_bulk_case", False))
+        candidate_note = str(row.get("candidate_note", "") or "").strip()
 
         per_box = int(rec["max_units_per_box"])
 
@@ -1480,6 +1509,7 @@ def build_repack_final_plan(
                         primary_cap,
                         box_no,
                         keep_height_cm,
+                        candidate_note,
                     )
                 )
                 remaining_qty -= primary_cap
@@ -1502,6 +1532,7 @@ def build_repack_final_plan(
                             item_qty,
                             box_no,
                             keep_height_cm,
+                            candidate_note,
                         )
                     )
                     remaining_qty -= item_qty
@@ -1535,6 +1566,7 @@ def build_repack_final_plan(
                 "best_orientation": selected_orientation,
                 "spec_source": rec.get("spec_source", ""),
                 "selection_policy": selection_policy,
+                "note": candidate_note,
                 "global_best_max_units_per_box": rec.get("global_best_max_units_per_box", rec["max_units_per_box"]),
                 "global_best_orientation": rec.get("global_best_orientation"),
                 "box_lines": box_lines,
