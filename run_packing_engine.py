@@ -36,6 +36,16 @@ def _to_bool(value: Any) -> bool:
     return str(value).strip().lower() in {"y", "yes", "true", "1", "필요", "예", "있음"}
 
 
+def _normalize_shipping_method(value: Any) -> str:
+    text = str(value or "").strip().lower()
+
+    if text in {"완박스", "fullbox", "full_box", "full-box"}:
+        return "fullbox"
+    if text in {"재포장", "repack", "re-pack", "re_pack"}:
+        return "repack"
+    return "auto"
+
+
 def _normalize_order_lines(order_lines: List[Any]) -> List[RawOrderLine]:
     """
     허용 입력 예시
@@ -117,10 +127,37 @@ def _serialize_match_results(matched_orders: List[Any]) -> List[Dict[str, Any]]:
     return results
 
 
+def build_forced_repack_fullbox_result(
+    matched_orders: List[Any],
+    extra_not_found: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    result = {
+        "single_fullboxes": [],
+        "group_mixed_fullboxes": [],
+        "tolerance_mixed_fullboxes": [],
+        "remainders": [],
+        "not_found": list(extra_not_found),
+    }
+
+    for row in matched_orders:
+        if getattr(row, "matched", False) and getattr(row, "matched_name", ""):
+            result["remainders"].append(
+                {
+                    "type": "repack_remainder",
+                    "product_name": row.matched_name,
+                    "qty": row.qty,
+                    "reason": "FORCED_REPACK",
+                }
+            )
+
+    return result
+
+
 def run_packing_engine(
     order_lines: List[Any],
     packing_list_needed: Any = False,
     master_path: str | Path | None = None,
+    shipping_method: Any = None,
 ) -> Dict[str, Any]:
     """
     엔진 전체 실행 함수
@@ -142,6 +179,7 @@ def run_packing_engine(
     """
 
     packing_list_needed = _to_bool(packing_list_needed)
+    shipping_method = _normalize_shipping_method(shipping_method)
     master_file = Path(master_path) if master_path else DEFAULT_MASTER
 
     raw_orders = _normalize_order_lines(order_lines)
@@ -186,14 +224,19 @@ def run_packing_engine(
                 }
             )
 
-    fullbox_result = run_fullbox_engine(
-        order_lines=engine_orders,
-        prepared_products_df=prepared_products,
-        rules=load_result["rules"],
-        fallback_fullboxes_df=load_result["fullboxes"],
-    )
-
-    fullbox_result["not_found"] = fullbox_result.get("not_found", []) + extra_not_found
+    if shipping_method == "repack":
+        fullbox_result = build_forced_repack_fullbox_result(
+            matched_orders=matched_orders,
+            extra_not_found=extra_not_found,
+        )
+    else:
+        fullbox_result = run_fullbox_engine(
+            order_lines=engine_orders,
+            prepared_products_df=prepared_products,
+            rules=load_result["rules"],
+            fallback_fullboxes_df=load_result["fullboxes"],
+        )
+        fullbox_result["not_found"] = fullbox_result.get("not_found", []) + extra_not_found
 
     repack_result = build_repack_candidates(
         fullbox_result=fullbox_result,
@@ -221,6 +264,7 @@ def run_packing_engine(
 
     return {
         "formatted_text": formatted_text,
+        "shipping_method": shipping_method,
         "final_result": final_result,
         "match_result": _serialize_match_results(matched_orders),
         "fullbox_result": fullbox_result,

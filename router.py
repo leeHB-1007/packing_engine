@@ -81,6 +81,16 @@ def normalize_order_items(order_items):
     return [normalize_order_item(x) for x in order_items]
 
 
+def normalize_shipping_method(value):
+    text = str(value or "").strip().lower()
+
+    if text in {"완박스", "fullbox", "full_box", "full-box"}:
+        return "fullbox"
+    if text in {"재포장", "repack", "re-pack", "re_pack"}:
+        return "repack"
+    return "auto"
+
+
 def import_module_safely(module_name):
     return importlib.import_module(module_name)
 
@@ -173,6 +183,8 @@ def call_function_flexibly(func, payload):
         "orders": payload.get("order_items"),
         "products": payload.get("order_items"),
         "product_list": payload.get("order_items"),
+        "shipping_method": payload.get("shipping_method"),
+        "ship_type": payload.get("shipping_method"),
 
         "base_box_code": payload.get("base_box_code"),
         "box_code": payload.get("box_code"),
@@ -763,7 +775,7 @@ def run_fixed_box_mix_checker(order_items, debug=False):
     return try_call_with_payload_variants(func, payload_variants)
 
 
-def run_main_packing_engine(order_items, debug=False):
+def run_main_packing_engine(order_items, debug=False, shipping_method="auto"):
     module = import_module_safely("run_packing_engine")
 
     candidate_names = [
@@ -780,19 +792,48 @@ def run_main_packing_engine(order_items, debug=False):
 
     payload = {
         "order_items": order_items,
+        "shipping_method": shipping_method,
         "debug": debug,
     }
 
     return call_function_flexibly(func, payload)
 
 
-def route_packing(order_items, debug=False):
+def route_packing(order_items, debug=False, shipping_method="auto"):
     order_items = normalize_order_items(order_items)
+    shipping_method = normalize_shipping_method(shipping_method)
 
     print("\n" + "=" * 90)
     print("[ROUTER] 주문 라우팅 시작")
     print("=" * 90)
     pprint(order_items, sort_dicts=False)
+    print(f"[ROUTER] shipping_method={shipping_method}")
+
+    if shipping_method == "repack":
+        print("\n[STEP 1] 재포장 강제 모드 - fixed_box_mix_checker 스킵")
+        engine_result = run_main_packing_engine(
+            order_items=order_items,
+            debug=debug,
+            shipping_method=shipping_method,
+        )
+        print("[ROUTER] run_packing_engine 결과 채택")
+        return {
+            "selected_engine": "run_packing_engine",
+            "result": engine_result,
+        }
+
+    if shipping_method == "fullbox":
+        print("\n[STEP 1] 완박스 강제 모드 - fixed_box_mix_checker 스킵")
+        engine_result = run_main_packing_engine(
+            order_items=order_items,
+            debug=debug,
+            shipping_method=shipping_method,
+        )
+        print("[ROUTER] run_packing_engine 결과 채택")
+        return {
+            "selected_engine": "run_packing_engine",
+            "result": engine_result,
+        }
 
     fixed_result = None
     fixed_ok = False
@@ -812,7 +853,11 @@ def route_packing(order_items, debug=False):
         }
 
     print("[STEP 2] run_packing_engine fallback 실행")
-    engine_result = run_main_packing_engine(order_items=order_items, debug=debug)
+    engine_result = run_main_packing_engine(
+        order_items=order_items,
+        debug=debug,
+        shipping_method=shipping_method,
+    )
 
     print("[ROUTER] run_packing_engine 결과 채택")
     return {

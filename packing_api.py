@@ -299,9 +299,13 @@ def build_export_filename(prefix: str = "packing_result") -> str:
     return f"{prefix}_{stamp}_{suffix}.xlsx"
 
 
-def execute_router(order_items: list[dict]) -> dict:
+def execute_router(order_items: list[dict], shipping_method: str = "") -> dict:
     with redirect_stdout(io.StringIO()):
-        return route_packing(order_items=order_items, debug=False)
+        return route_packing(
+            order_items=order_items,
+            debug=False,
+            shipping_method=shipping_method,
+        )
 
 
 def render_router_result(router_result: dict, packing_list_needed: str) -> str:
@@ -411,7 +415,7 @@ def pack(request: PackRequest):
         )
 
     try:
-        future = EXECUTOR.submit(execute_router, order_items)
+        future = EXECUTOR.submit(execute_router, order_items, shipping_method)
         routed_result = future.result(timeout=ENGINE_TIMEOUT_SECONDS)
         result = render_router_result(routed_result, packing_flag)
         display_payload = build_router_display_payload(routed_result)
@@ -488,7 +492,7 @@ def pack_export_xlsx(request: PackRequest):
         )
 
     try:
-        routed_result = execute_router(order_items)
+        routed_result = execute_router(order_items, shipping_method)
 
         WEB_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
         output_file = WEB_EXPORT_DIR / build_export_filename(prefix="sulu_med_export")
