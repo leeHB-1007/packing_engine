@@ -10,6 +10,7 @@
 
 import re
 from router import route_packing, print_final_summary
+from sulu_med_exporter import build_router_display_payload
 
 
 def parse_order_text(text: str):
@@ -102,6 +103,41 @@ def _fmt_weight_display(value):
         return f"{adjusted:.1f} kg"
     except Exception:
         return "-"
+
+
+def _fmt_precise_weight_display(value):
+    try:
+        num = float(value)
+    except Exception:
+        return "-"
+
+    return f"{num:.3f}".rstrip("0").rstrip(".") + " kg"
+
+
+def _build_plan_size_text(plan):
+    outer_size = plan.get("outer_size_cm", [])
+    if not isinstance(outer_size, (list, tuple)) or len(outer_size) != 3:
+        return "-"
+
+    trimmed_outer_height = None
+    box_lines = plan.get("box_lines", []) or []
+    if box_lines:
+        trimmed_outer_height = box_lines[0].get("trimmed_outer_height_cm")
+
+    dims = [outer_size[0], outer_size[1], outer_size[2]]
+    if trimmed_outer_height not in (None, ""):
+        dims[2] = trimmed_outer_height
+
+    def _fmt_size(v):
+        try:
+            f = float(v)
+            if f.is_integer():
+                return str(int(f))
+            return str(f)
+        except Exception:
+            return str(v)
+
+    return f"{_fmt_size(dims[0])} x {_fmt_size(dims[1])} x {_fmt_size(dims[2])}"
 
 
 def _print_fixed_box_clean(result):
@@ -226,28 +262,76 @@ def _print_run_engine_clean(result):
 
     for idx, plan in enumerate(final_plans, start=1):
         product_name = plan.get("product_name", "-")
-        recommended_box = plan.get("recommended_box", {})
+        boxes_needed = plan.get("boxes_needed") or 0
+        size_text = _build_plan_size_text(plan)
 
-        outer_size = recommended_box.get("outer_size_cm", [])
-        if isinstance(outer_size, (list, tuple)) and len(outer_size) == 3:
-            def _fmt_size(v):
-                try:
-                    f = float(v)
-                    if f.is_integer():
-                        return str(int(f))
-                    return str(f)
-                except Exception:
-                    return str(v)
+        box_lines = plan.get("box_lines", []) or []
+        gross_weight = None
+        if box_lines:
+            gross_weight = box_lines[0].get("gross_weight_est")
 
-                # not reached
-            size_text = f"{_fmt_size(outer_size[0])} x {_fmt_size(outer_size[1])} x {_fmt_size(outer_size[2])}"
-        else:
-            size_text = "-"
+        print(
+            f"\n{idx}. {product_name} / {size_text} / {boxes_needed}박스 / "
+            f"{_fmt_precise_weight_display(gross_weight)}"
+        )
 
-        boxes_needed = plan.get("boxes_needed") or recommended_box.get("boxes_needed") or 0
-        weight = _calc_box_weight_for_plan(plan, recommended_box)
 
-        print(f"\n{idx}. {product_name} / {size_text} / {boxes_needed}박스 / {_fmt_weight_display(weight)}")
+def _format_box_range(group):
+    start = int(group.get("box_no_start", 0) or 0)
+    end = int(group.get("box_no_end", 0) or 0)
+
+    if start and end and start != end:
+        return f"{start}~{end}"
+    if start:
+        return str(start)
+    return "-"
+
+
+def _print_router_grouped_clean(final_result):
+    payload = build_router_display_payload(final_result)
+    groups = payload.get("groups", []) or []
+    issues = payload.get("issues", []) or []
+
+    print("\n" + "=" * 90)
+    print("[최종 결과]")
+    print("=" * 90)
+
+    total_boxes = sum(int(group.get("box_count", 0) or 0) for group in groups)
+    print(f"총 박스수: {total_boxes}박스")
+
+    for idx, group in enumerate(groups, start=1):
+        product_names = ", ".join(
+            str(item.get("product_name", "") or "").strip()
+            for item in group.get("item_rows", []) or []
+            if str(item.get("product_name", "") or "").strip()
+        )
+        box_range = _format_box_range(group)
+        box_size = str(group.get("box_size_cm", "") or "").strip() or "-"
+        box_count = int(group.get("box_count", 0) or 0)
+        total_weight = group.get("total_weight_kg", "-")
+
+        print(
+            f"\n{idx}. {box_range} / {product_names or '-'} / "
+            f"{box_size} / {box_count}박스 / {_fmt_precise_weight_display(total_weight)}"
+        )
+
+    if issues:
+        suppress_from_not_found = set()
+        for _, issue_key, product_name, qty, reason in issues:
+            if issue_key in {"ambiguous", "unresolved"}:
+                suppress_from_not_found.add((product_name, qty, reason))
+
+        issue_groups = {}
+        for _, issue_key, product_name, qty, reason in issues:
+            if issue_key == "not_found" and (product_name, qty, reason) in suppress_from_not_found:
+                continue
+            issue_groups.setdefault(issue_key, []).append((product_name, qty, reason))
+
+        for issue_key, rows in issue_groups.items():
+            print(f"\n[{issue_key}]")
+            for product_name, qty, reason in rows:
+                label = product_name or "상품명없음"
+                print(f"- {label} / {qty or '-'} / {reason or '-'}")
 
 
 def print_clean_final_result(final_result):
@@ -257,7 +341,10 @@ def print_clean_final_result(final_result):
     if selected_engine == "fixed_box_mix_checker":
         _print_fixed_box_clean(result)
     else:
-        _print_run_engine_clean(result)
+        try:
+            _print_router_grouped_clean(final_result)
+        except Exception:
+            _print_run_engine_clean(result)
 
 
 def main():

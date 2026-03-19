@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Packing Engine Web Apply</title>
+    <link rel="stylesheet" href="/app-assets/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">Packing Engine Web Apply</p>
+          <h1>주문 텍스트를 넣고 바로 패킹 결과를 확인하세요.</h1>
+        </div>
+        <div class="hero-card">
+          <p class="hero-card-label">빠른 시작</p>
+          <ol class="steps">
+            <li>`uvicorn packing_api:app --reload` 실행</li>
+            <li>브라우저에서 `http://127.0.0.1:8000/app` 접속</li>
+            <li>주문 입력 후 결과 확인</li>
+          </ol>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="panel form-panel">
+          <div class="panel-header">
+            <h2>주문 입력</h2>
+            <button id="sampleBtn" class="ghost-button" type="button">샘플 채우기</button>
+          </div>
+
+          <form id="packForm" class="form-stack">
+            <div class="field-row">
+              <label class="field">
+                <span>출고 방법</span>
+                <select id="shippingMethod" name="shippingMethod">
+                  <option value="">자동 판별</option>
+                  <option value="완박스">완박스</option>
+                  <option value="재포장">재포장</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>패킹리스트</span>
+                <select id="packingListNeeded" name="packingListNeeded">
+                  <option value="no">no</option>
+                  <option value="yes">yes</option>
+                </select>
+              </label>
+            </div>
+
+            <label class="field">
+              <span>주문 텍스트</span>
+              <textarea
+                id="orderText"
+                name="orderText"
+                rows="14"
+                placeholder="예시&#10;완박스&#10;패킹리스트 no&#10;1. 레드톡스 100u / 10&#10;2. 리체스 TX100 / 50"
+              ></textarea>
+            </label>
+
+            <div class="helper-box">
+              <p class="helper-title">입력 형식 예시</p>
+              <ul class="helper-list">
+                <li>`상품명 / 수량`</li>
+                <li>`상품명 수량`</li>
+                <li>앞에 `완박스`, `재포장`, `패킹리스트 yes/no` 줄이 있어도 됩니다.</li>
+              </ul>
+            </div>
+
+            <div class="button-row">
+              <button id="submitBtn" class="primary-button" type="submit">패킹 결과 확인</button>
+              <button id="downloadBtn" class="secondary-button" type="button">엑셀 다운로드</button>
+              <button id="resetBtn" class="secondary-button" type="button">초기화</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panel result-panel">
+          <div class="panel-header">
+            <h2>결과</h2>
+            <span id="statusBadge" class="status-badge idle">대기 중</span>
+          </div>
+
+          <div class="summary-grid">
+            <div class="summary-card">
+              <p class="summary-label">성공 여부</p>
+              <p id="successValue" class="summary-value">-</p>
+            </div>
+            <div class="summary-card">
+              <p class="summary-label">정규화 출고 방법</p>
+              <p id="shippingValue" class="summary-value">-</p>
+            </div>
+            <div class="summary-card">
+              <p class="summary-label">패킹리스트 여부</p>
+              <p id="packingListValue" class="summary-value">-</p>
+            </div>
+            <div class="summary-card">
+              <p class="summary-label">선택 엔진</p>
+              <p id="engineValue" class="summary-value">-</p>
+            </div>
+          </div>
+
+          <div class="output-stack">
+            <section class="output-block">
+              <div class="output-header">
+                <h3>패킹 테이블</h3>
+              </div>
+              <div id="tableSummary" class="table-summary">아직 결과가 없습니다.</div>
+              <div class="table-wrap">
+                <table class="result-table">
+                  <thead>
+                    <tr>
+                      <th>박스번호</th>
+                      <th>품명</th>
+                      <th>포장단위</th>
+                      <th>박스사이즈(Cm)</th>
+                      <th>박스수량</th>
+                      <th>낱개수량</th>
+                      <th>중량(Kg)</th>
+                      <th>합계(kg)</th>
+                      <th>비고</th>
+                    </tr>
+                  </thead>
+                  <tbody id="resultTableBody">
+                    <tr>
+                      <td colspan="9" class="empty-cell">아직 결과가 없습니다.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="output-block">
+              <div class="output-header">
+                <h3>정규화된 주문 텍스트</h3>
+                <button data-copy-target="normalizedOutput" class="ghost-button small-button" type="button">복사</button>
+              </div>
+              <pre id="normalizedOutput" class="output-pre">아직 결과가 없습니다.</pre>
+            </section>
+
+            <section class="output-block">
+              <div class="output-header">
+                <h3>엔진 결과</h3>
+                <button data-copy-target="resultOutput" class="ghost-button small-button" type="button">복사</button>
+              </div>
+              <pre id="resultOutput" class="output-pre">아직 결과가 없습니다.</pre>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app-assets/app.js"></script>
+  </body>
+</html>

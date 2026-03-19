@@ -112,6 +112,35 @@ def _build_product_lookup(prepared_products_df: pd.DataFrame) -> Dict[str, dict]
     return lookup
 
 
+def _build_fullbox_only_product_lookup(fullboxes_df: pd.DataFrame | None) -> Dict[str, dict]:
+    if fullboxes_df is None or len(fullboxes_df) == 0:
+        return {}
+
+    df = fullboxes_df.copy()
+    lookup: Dict[str, dict] = {}
+
+    for _, row in df.iterrows():
+        name = _norm_text(row.get(_norm_col("국문상품명"), ""))
+        if not name:
+            continue
+
+        lookup[name] = {
+            "상품코드": _norm_text(row.get(_norm_col("상품코드"), "")),
+            "국문상품명": name,
+            "가로(cm)": _to_float(row.get(_norm_col("완박스가로(cm)"), 0)),
+            "세로(cm)": _to_float(row.get(_norm_col("완박스세로(cm)"), 0)),
+            "높이(cm)": _to_float(row.get(_norm_col("완박스높이(cm)"), 0)),
+            # fullboxes-only fallback uses fullbox gross weight as a practical estimate.
+            "개당중량(kg)": _to_float(row.get(_norm_col("완박스중량(kg)"), 0)),
+            "특수상품군": "",
+            "패키지상품여부": False,
+            "패킹정책코드": "",
+            "패키지정책참조": "",
+        }
+
+    return lookup
+
+
 def _build_package_lookup(prepared_packages_df: pd.DataFrame | None) -> Dict[str, dict]:
     if prepared_packages_df is None or len(prepared_packages_df) == 0:
         return {}
@@ -221,8 +250,11 @@ def build_repack_candidates(
     fullbox_result: Dict[str, List[dict]],
     prepared_products_df: pd.DataFrame,
     prepared_packages_df: pd.DataFrame | None = None,
+    fallback_fullboxes_df: pd.DataFrame | None = None,
 ) -> Dict[str, List[dict]]:
     product_lookup = _build_product_lookup(prepared_products_df)
+    for product_name, payload in _build_fullbox_only_product_lookup(fallback_fullboxes_df).items():
+        product_lookup.setdefault(product_name, payload)
     package_lookup = _build_package_lookup(prepared_packages_df)
 
     candidates: List[RepackCandidate] = []

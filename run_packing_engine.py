@@ -199,6 +199,7 @@ def run_packing_engine(
         fullbox_result=fullbox_result,
         prepared_products_df=prepared_products,
         prepared_packages_df=prepared_packages,
+        fallback_fullboxes_df=load_result["fullboxes"],
     )
 
     repack_box_result = evaluate_repack_box_candidates(

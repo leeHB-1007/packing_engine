@@ -121,6 +121,25 @@ def _build_master_context(master_path: str | Path | None = None) -> Dict[str, di
                 _to_float(row.get("외경높이(cm)"), 0.0),
             ),
             "box_weight_kg": _to_float(row.get("박스중량(kg)"), 0.0),
+            "weight_mode": "box_only",
+        }
+
+    fullboxes_df = load_result["fullboxes"]
+    for _, row in fullboxes_df.iterrows():
+        box_code = str(row.get("완박스박스코드", "") or "").strip()
+        if not box_code:
+            continue
+
+        box_lookup[box_code] = {
+            "box_name": str(row.get("완박스박스명", "") or "").strip(),
+            "outer_size_cm": (
+                _to_float(row.get("완박스가로(cm)"), 0.0),
+                _to_float(row.get("완박스세로(cm)"), 0.0),
+                _to_float(row.get("완박스높이(cm)"), 0.0),
+            ),
+            # fullboxes_master weight is treated as gross weight for one full box.
+            "box_weight_kg": _to_float(row.get("완박스중량(kg)"), 0.0),
+            "weight_mode": "fullbox_gross",
         }
 
     return {
@@ -215,6 +234,7 @@ def _build_fullbox_groups(
             outer_size_cm = box_meta.get("outer_size_cm", ())
             box_size_cm = _format_box_size(outer_size_cm)
             box_weight_kg = _to_float(box_meta.get("box_weight_kg"), 0.0)
+            weight_mode = str(box_meta.get("weight_mode", "") or "").strip()
             items = box.get("items", []) or []
 
             if len(items) == 1:
@@ -222,7 +242,10 @@ def _build_fullbox_groups(
                 product_name = str(item.get("product_name", "") or "").strip()
                 item_qty = _to_int(item.get("qty"), 0)
                 unit_weight_kg = _to_float(product_lookup.get(product_name, {}).get("unit_weight_kg"), 0.0)
-                gross_weight = box_weight_kg + (item_qty * unit_weight_kg)
+                if weight_mode == "fullbox_gross":
+                    gross_weight = box_weight_kg
+                else:
+                    gross_weight = box_weight_kg + (item_qty * unit_weight_kg)
 
                 groups.append(
                     _new_export_group(
@@ -261,7 +284,10 @@ def _build_fullbox_groups(
                         )
                     )
 
-                gross_weight = box_weight_kg + total_item_weight
+                if weight_mode == "fullbox_gross":
+                    gross_weight = box_weight_kg
+                else:
+                    gross_weight = box_weight_kg + total_item_weight
                 groups.append(
                     _new_export_group(
                         box_size_cm=box_size_cm,
@@ -332,6 +358,61 @@ def _build_repack_groups(
             next_box_no += 1
 
     return groups, next_box_no
+
+
+def _build_fixed_box_mix_groups(
+    fixed_box_result: Dict[str, Any],
+    code_map: Dict[str, str],
+) -> List[dict]:
+    groups: List[dict] = []
+    selected_box = fixed_box_result.get("selected_box", {}) or {}
+    outer_size_cm = (
+        selected_box.get("외경가로(cm)"),
+        selected_box.get("외경세로(cm)"),
+        selected_box.get("외경높이(cm)"),
+    )
+    box_size_cm = _format_box_size(outer_size_cm)
+
+    for box in fixed_box_result.get("boxes", []) or []:
+        item_rows = []
+        each_qty = 0
+
+        for item in box.get("items", []) or []:
+            calc_unit_type = _normalize_calc_unit(item.get("calc_unit_type"))
+            package_pack_qty = _to_int(item.get("package_pack_qty"), 1)
+            alloc_qty = _to_int(item.get("qty"), 0)
+
+            if calc_unit_type == "package":
+                packing_unit = package_pack_qty
+                line_each_qty = alloc_qty * package_pack_qty
+            else:
+                packing_unit = alloc_qty
+                line_each_qty = alloc_qty
+
+            each_qty += line_each_qty
+            product_name = str(item.get("product_name", "") or "").strip()
+            item_rows.append(
+                _new_item_row(
+                    product_code=code_map.get(product_name, ""),
+                    product_name=product_name,
+                    packing_unit=packing_unit,
+                )
+            )
+
+        groups.append(
+            _new_export_group(
+                box_no=_to_int(box.get("box_no"), 0),
+                box_size_cm=box_size_cm,
+                box_count=1,
+                each_qty=each_qty,
+                weight_kg=box.get("gross_weight_est"),
+                total_weight_kg=box.get("gross_weight_est"),
+                item_rows=item_rows,
+                note="",
+            )
+        )
+
+    return groups
 
 
 def _merge_consecutive_groups(groups: List[dict]) -> List[dict]:
@@ -457,6 +538,24 @@ def _collect_issues(engine_result: Dict[str, Any]) -> List[tuple]:
                     str(item.get("reason", "") or ""),
                 )
             )
+
+    for item in engine_result.get("match_result", []) or []:
+        if not isinstance(item, dict):
+            continue
+
+        status = str(item.get("status", "") or "").strip().lower()
+        if status not in {"ambiguous", "unresolved"}:
+            continue
+
+        issues.append(
+            (
+                "match_result",
+                status,
+                str(item.get("input_name", "") or item.get("raw_input", "") or ""),
+                str(item.get("qty", "") or ""),
+                str(item.get("reason", "") or item.get("message", "") or ""),
+            )
+        )
 
     unique = []
     seen = set()
@@ -695,4 +794,140 @@ def export_engine_result_to_sulu_med_xlsx(
         "output_path": str(output_file),
         "row_count": len(merged_groups),
         "issue_count": len(issues),
+    }
+
+
+def build_router_display_payload(
+    router_result: Dict[str, Any],
+    master_path: str | Path | None = None,
+    shipment_mark: str = "",
+) -> Dict[str, Any]:
+    selected_engine = str(router_result.get("selected_engine", "") or "").strip()
+    result = router_result.get("result", {}) or {}
+
+    if selected_engine == "run_packing_engine":
+        context = _build_master_context(master_path=master_path)
+        product_lookup = context["product_lookup"]
+        box_lookup = context["box_lookup"]
+        code_map = _build_code_map(result, product_lookup)
+
+        groups: List[dict] = []
+        next_box_no = 1
+
+        fullbox_groups, next_box_no = _build_fullbox_groups(
+            fullbox_result=result.get("fullbox_result", {}) or {},
+            box_lookup=box_lookup,
+            product_lookup=product_lookup,
+            code_map=code_map,
+            start_box_no=next_box_no,
+        )
+        groups.extend(fullbox_groups)
+
+        repack_groups, next_box_no = _build_repack_groups(
+            final_result=result.get("final_result", {}) or {},
+            code_map=code_map,
+            start_box_no=next_box_no,
+        )
+        groups.extend(repack_groups)
+
+        merged_groups = _merge_consecutive_groups(groups)
+        resolved_mark = _resolve_shipment_mark(merged_groups, explicit_mark=shipment_mark)
+        reference_rows = _build_reference_rows(merged_groups)
+        issues = _collect_issues(result)
+
+        return {
+            "selected_engine": selected_engine,
+            "groups": merged_groups,
+            "shipment_mark": resolved_mark,
+            "reference_rows": reference_rows,
+            "issues": issues,
+        }
+
+    context = _build_master_context(master_path=master_path)
+    product_lookup = context["product_lookup"]
+    code_map = {
+        product_name: payload.get("product_code", "")
+        for product_name, payload in product_lookup.items()
+        if payload.get("product_code")
+    }
+
+    groups: List[dict] = []
+    issues: List[tuple] = []
+
+    if selected_engine == "fixed_box_mix_checker":
+        groups = _build_fixed_box_mix_groups(result, code_map=code_map)
+
+        for issue_key in ("not_found", "unresolved", "invalid_specs", "no_fit"):
+            for item in result.get(issue_key, []) or []:
+                if isinstance(item, dict):
+                    issues.append(
+                        (
+                            selected_engine,
+                            issue_key,
+                            str(item.get("product_name", "") or ""),
+                            str(item.get("qty", "") or ""),
+                            str(item.get("reason", "") or ""),
+                        )
+                    )
+
+        if bool(result.get("pack_failed", False)):
+            issues.append(
+                (
+                    selected_engine,
+                    "pack_failed",
+                    "",
+                    "",
+                    str(result.get("pack_failed_reason", "") or ""),
+                )
+            )
+    else:
+        raise ValueError(f"지원하지 않는 라우터 결과입니다: {selected_engine or 'UNKNOWN'}")
+
+    merged_groups = _merge_consecutive_groups(groups)
+    resolved_mark = _resolve_shipment_mark(merged_groups, explicit_mark=shipment_mark)
+    reference_rows = _build_reference_rows(merged_groups)
+
+    return {
+        "selected_engine": selected_engine,
+        "groups": merged_groups,
+        "shipment_mark": resolved_mark,
+        "reference_rows": reference_rows,
+        "issues": issues,
+    }
+
+
+def export_router_result_to_sulu_med_xlsx(
+    router_result: Dict[str, Any],
+    output_path: str | Path,
+    title: str = "Sulu Med 출하건",
+    master_path: str | Path | None = None,
+    shipment_mark: str = "",
+) -> Dict[str, Any]:
+    payload = build_router_display_payload(
+        router_result=router_result,
+        master_path=master_path,
+        shipment_mark=shipment_mark,
+    )
+
+    groups = payload["groups"]
+    resolved_mark = payload["shipment_mark"]
+    reference_rows = payload["reference_rows"]
+    issues = payload["issues"]
+
+    wb = Workbook()
+    ws = wb.active
+    _apply_sheet1_layout(ws, title=title)
+    _write_sheet1_rows(ws, groups, shipment_mark=resolved_mark)
+    _write_reference_sheet(wb, reference_rows)
+    _write_issues_sheet(wb, issues)
+
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(output_file)
+
+    return {
+        "output_path": str(output_file),
+        "row_count": len(groups),
+        "issue_count": len(issues),
+        "selected_engine": payload["selected_engine"],
     }

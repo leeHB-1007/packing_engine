@@ -185,6 +185,15 @@ class ProductMatcher:
 
         self.index = self._build_index()
 
+    @staticmethod
+    def _source_priority(source: str) -> int:
+        priority = {
+            "products": 3,
+            "fullboxes": 2,
+            "packages": 1,
+        }
+        return priority.get(source, 0)
+
     def _build_index(self) -> Dict[str, List[Dict[str, Any]]]:
         indexed_rows: List[Dict[str, Any]] = []
 
@@ -289,16 +298,10 @@ class ProductMatcher:
         unique_candidates = list(dedup.values())
 
         # 6) 우선순위 정렬
-        source_priority = {
-            "products": 3,
-            "fullboxes": 2,
-            "packages": 1,
-        }
-
         unique_candidates.sort(
             key=lambda x: (
                 x.score,
-                source_priority.get(x.source, 0),
+                self._source_priority(x.source),
                 len(compact_name(x.product_name)),
             ),
             reverse=True,
@@ -309,21 +312,26 @@ class ProductMatcher:
 
         top_score = unique_candidates[0].score
         top_group = [c for c in unique_candidates if c.score == top_score]
+        top_source_priority = max(self._source_priority(c.source) for c in top_group)
+        prioritized_top_group = [
+            c for c in top_group
+            if self._source_priority(c.source) == top_source_priority
+        ]
 
         unique_top_products = {
             (c.product_code, compact_name(c.product_name))
-            for c in top_group
+            for c in prioritized_top_group
         }
 
         if len(unique_top_products) > 1:
             return (
                 "ambiguous",
                 None,
-                top_group[:10],
+                prioritized_top_group[:10],
                 f"동일 점수 후보가 {len(unique_top_products)}개라 자동 확정하지 않았습니다.",
             )
 
-        selected = unique_candidates[0]
+        selected = prioritized_top_group[0]
         return (
             "matched",
             selected,
