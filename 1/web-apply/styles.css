@@ -149,12 +149,14 @@ body {
 }
 
 select,
+input,
 textarea,
 button {
   font: inherit;
 }
 
 select,
+input,
 textarea {
   width: 100%;
   border: 1px solid var(--line);
@@ -173,12 +175,14 @@ textarea {
 }
 
 select:focus,
+input:focus,
 textarea:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 4px rgba(36, 87, 74, 0.12);
 }
 
 .helper-box,
+.spec-summary-card,
 .summary-card,
 .output-block {
   border: 1px solid rgba(183, 168, 143, 0.7);
@@ -187,6 +191,71 @@ textarea:focus {
   padding: 16px;
   min-width: 0;
   width: 100%;
+}
+
+.spec-check-panel {
+  margin-top: 18px;
+  display: grid;
+  gap: 14px;
+}
+
+.spec-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.spec-card {
+  border: 1px solid rgba(183, 168, 143, 0.7);
+  border-radius: 18px;
+  background: rgba(255, 248, 236, 0.85);
+  padding: 16px;
+  min-width: 0;
+}
+
+.spec-card h3 {
+  margin: 0 0 12px;
+}
+
+.spec-summary-text {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.spec-list {
+  margin: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.spec-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 0.95fr) minmax(0, 1.3fr);
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px dashed rgba(183, 168, 143, 0.7);
+}
+
+.spec-row:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.spec-row dt {
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.spec-row dd,
+.spec-row dt {
+  margin: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.spec-empty {
+  color: var(--muted);
+  line-height: 1.6;
 }
 
 .helper-title,
@@ -396,6 +465,10 @@ textarea:focus {
 
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .spec-grid {
+    grid-template-columns: 1fr;
   }
 }
 

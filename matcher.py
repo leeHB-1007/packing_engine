@@ -184,6 +184,7 @@ class ProductMatcher:
         self.name_keys = ["국문상품명", "상품명", "product_name", "name", "item_name"]
 
         self.index = self._build_index()
+        self.products_by_code = self._build_products_by_code()
 
     @staticmethod
     def _source_priority(source: str) -> int:
@@ -215,6 +216,38 @@ class ProductMatcher:
                 })
 
         return {"rows": indexed_rows}
+
+    def _build_products_by_code(self) -> Dict[str, Dict[str, Any]]:
+        products: Dict[str, Dict[str, Any]] = {}
+        for row in self.index["rows"]:
+            if row["source"] != "products":
+                continue
+            product_code = row["product_code"]
+            if not product_code:
+                continue
+            products[product_code] = row
+        return products
+
+    def _prefer_products_candidate(self, candidate: Candidate) -> Candidate:
+        if candidate.source == "products":
+            return candidate
+
+        product_code = normalize_code(candidate.product_code)
+        if not product_code:
+            return candidate
+
+        product_row = self.products_by_code.get(product_code)
+        if not product_row:
+            return candidate
+
+        return Candidate(
+            source="products",
+            product_code=product_row["product_code"],
+            product_name=product_row["product_name"],
+            score=candidate.score,
+            reason=f"{candidate.reason}_PREFER_PRODUCTS",
+            row=product_row["row"],
+        )
 
     def match(self, item_text: str) -> Tuple[str, Optional[Candidate], List[Candidate], str]:
         raw = str(item_text or "").strip()
@@ -331,7 +364,7 @@ class ProductMatcher:
                 f"동일 점수 후보가 {len(unique_top_products)}개라 자동 확정하지 않았습니다.",
             )
 
-        selected = prioritized_top_group[0]
+        selected = self._prefer_products_candidate(prioritized_top_group[0])
         return (
             "matched",
             selected,

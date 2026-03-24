@@ -187,6 +187,19 @@ def _new_item_row(
     }
 
 
+def _format_packing_unit_display(
+    *,
+    calc_unit_type: str,
+    package_pack_qty: int,
+    alloc_qty: int,
+) -> Any:
+    if _normalize_calc_unit(calc_unit_type) == "package":
+        if alloc_qty <= 1:
+            return package_pack_qty
+        return f"{package_pack_qty} x {alloc_qty}"
+    return alloc_qty
+
+
 def _new_export_group(
     *,
     box_no: int,
@@ -225,6 +238,8 @@ def _build_fullbox_groups(
         ("single_fullboxes", ""),
         ("group_mixed_fullboxes", ""),
         ("tolerance_mixed_fullboxes", ""),
+        ("mixed_partial_fullbox_cartons", "완박스 잔량 합포"),
+        ("partial_fullbox_cartons", "완박스 잔량 카톤"),
     ]
 
     for bucket_name, note in fullbox_types:
@@ -235,6 +250,7 @@ def _build_fullbox_groups(
             box_size_cm = _format_box_size(outer_size_cm)
             box_weight_kg = _to_float(box_meta.get("box_weight_kg"), 0.0)
             weight_mode = str(box_meta.get("weight_mode", "") or "").strip()
+            explicit_gross_weight = box.get("gross_weight_kg")
             items = box.get("items", []) or []
 
             if len(items) == 1:
@@ -242,7 +258,9 @@ def _build_fullbox_groups(
                 product_name = str(item.get("product_name", "") or "").strip()
                 item_qty = _to_int(item.get("qty"), 0)
                 unit_weight_kg = _to_float(product_lookup.get(product_name, {}).get("unit_weight_kg"), 0.0)
-                if weight_mode == "fullbox_gross":
+                if explicit_gross_weight not in (None, ""):
+                    gross_weight = _to_float(explicit_gross_weight, 0.0)
+                elif weight_mode == "fullbox_gross":
                     gross_weight = box_weight_kg
                 else:
                     gross_weight = box_weight_kg + (item_qty * unit_weight_kg)
@@ -284,7 +302,9 @@ def _build_fullbox_groups(
                         )
                     )
 
-                if weight_mode == "fullbox_gross":
+                if explicit_gross_weight not in (None, ""):
+                    gross_weight = _to_float(explicit_gross_weight, 0.0)
+                elif weight_mode == "fullbox_gross":
                     gross_weight = box_weight_kg
                 else:
                     gross_weight = box_weight_kg + total_item_weight
@@ -314,6 +334,54 @@ def _build_repack_groups(
     groups: List[dict] = []
     next_box_no = start_box_no
 
+    for mixed_box in final_result.get("mixed_repack_boxes", []) or []:
+        item_rows = []
+        each_qty = 0
+
+        for item in mixed_box.get("items", []) or []:
+            calc_unit_type = _normalize_calc_unit(item.get("calc_unit_type"))
+            package_pack_qty = _to_int(item.get("package_pack_qty"), 1)
+            alloc_qty = _to_int(item.get("qty"), 0)
+
+            if calc_unit_type == "package":
+                packing_unit = _format_packing_unit_display(
+                    calc_unit_type=calc_unit_type,
+                    package_pack_qty=package_pack_qty,
+                    alloc_qty=alloc_qty,
+                )
+                line_each_qty = alloc_qty * package_pack_qty
+            else:
+                packing_unit = _format_packing_unit_display(
+                    calc_unit_type=calc_unit_type,
+                    package_pack_qty=package_pack_qty,
+                    alloc_qty=alloc_qty,
+                )
+                line_each_qty = alloc_qty
+
+            each_qty += line_each_qty
+            product_name = str(item.get("product_name", "") or "").strip()
+            item_rows.append(
+                _new_item_row(
+                    product_code=code_map.get(product_name, ""),
+                    product_name=product_name,
+                    packing_unit=packing_unit,
+                )
+            )
+
+        groups.append(
+            _new_export_group(
+                box_size_cm=_format_box_size(mixed_box.get("outer_size_cm", ())),
+                box_no=next_box_no,
+                box_count=1,
+                each_qty=each_qty,
+                weight_kg=mixed_box.get("gross_weight_est"),
+                total_weight_kg=mixed_box.get("gross_weight_est"),
+                item_rows=item_rows,
+                note=str(mixed_box.get("note", "") or "").strip(),
+            )
+        )
+        next_box_no += 1
+
     for plan in final_result.get("final_plans", []) or []:
         product_name = str(plan.get("product_name", "") or "").strip()
         package_pack_qty = _to_int(plan.get("package_pack_qty"), 1)
@@ -327,10 +395,18 @@ def _build_repack_groups(
 
             if calc_unit_type == "package":
                 each_qty = box_qty * package_pack_qty
-                packing_unit = package_pack_qty
+                packing_unit = _format_packing_unit_display(
+                    calc_unit_type=calc_unit_type,
+                    package_pack_qty=package_pack_qty,
+                    alloc_qty=box_qty,
+                )
             else:
                 each_qty = box_qty
-                packing_unit = box_qty
+                packing_unit = _format_packing_unit_display(
+                    calc_unit_type=calc_unit_type,
+                    package_pack_qty=package_pack_qty,
+                    alloc_qty=box_qty,
+                )
 
             box_size_cm = _format_box_size(
                 box_line.get("outer_size_cm", plan.get("outer_size_cm", ())),

@@ -12,6 +12,7 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from contextlib import redirect_stdout
 from datetime import datetime
+from functools import lru_cache
 import io
 from pathlib import Path
 from typing import Any, Optional
@@ -23,6 +24,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from master_loader import load_master_workbook
+from master_loader import prepare_products_for_engine
+from matcher import ProductMatcher
+from matcher import compact_name
+from matcher import normalize_code
 from router import route_packing
 from router import print_final_summary
 from sulu_med_exporter import (
@@ -43,6 +49,7 @@ WEB_EXPORT_DIR = (
     if IS_VERCEL
     else Path(__file__).resolve().parent / "output" / "web_exports"
 )
+MASTER_FILE = Path(__file__).resolve().parent / "data" / "packing_engine_normalized_masters_ko_json_schema_fixed.xlsx"
 
 servers = [{"url": "http://127.0.0.1:8000", "description": "Local development URL"}]
 if PUBLIC_SERVER_URL:
@@ -69,7 +76,7 @@ class PackRequest(BaseModel):
         ...,
         description="주문 텍스트 전체",
         examples=[
-            "완박스\n패킹리스트 yes\n1. 비에녹스200u / 75\n2. 리체스 딥 리도(C) / 225\n3. 엘라스티 D 플러스(1syr) / 25"
+            "완박스\n패킹리스트 yes\n1. 비에녹스200u / 75\n2. A100110 / 15\n3. 엘라스티 D 플러스(1syr) / 25"
         ],
     )
     packing_list_needed: Optional[str] = Field(
@@ -114,8 +121,8 @@ def normalize_shipping_method(value: Optional[str], raw_text: str) -> str:
     if "재포장" in combined or "repack" in combined or "re-pack" in combined or "re pack" in combined:
         return "재포장"
 
-    # 기본값은 빈 문자열
-    return ""
+    # 기본값은 재포장
+    return "재포장"
 
 
 def _normalize_yes_no_value(value: Optional[str]) -> str:
@@ -262,7 +269,7 @@ def build_engine_order_text(
     shipping_method: str,
     packing_list_needed: str,
     order_lines: list[str],
-) -> str:
+    ) -> str:
     parts = []
 
     if shipping_method:
@@ -344,6 +351,237 @@ def build_table_totals(groups: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+class ProductSpecRequest(BaseModel):
+    query: str = Field(
+        ...,
+        description="조회할 상품코드 또는 상품명",
+        examples=["A100110", "레드톡스 100u", "엘라스티 D 플러스(1syr)"],
+    )
+
+
+class ProductSpecResponse(BaseModel):
+    success: bool
+    query: str
+    match_status: str
+    matched_code: str = ""
+    matched_name: str = ""
+    match_source: str = ""
+    match_reason: str = ""
+    message: str = ""
+    item_spec: dict[str, Any] = Field(default_factory=dict)
+    fullbox_spec: dict[str, Any] = Field(default_factory=dict)
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+
+
+def _master_cache_key() -> str:
+    stat = MASTER_FILE.stat()
+    return f"{MASTER_FILE}:{stat.st_mtime_ns}:{stat.st_size}"
+
+
+@lru_cache(maxsize=2)
+def _load_spec_search_data(_cache_key: str) -> dict[str, Any]:
+    load_result = load_master_workbook(MASTER_FILE)
+    prepared_products = prepare_products_for_engine(
+        load_result["products"],
+        load_result["fullboxes"],
+    )
+
+    return {
+        "prepared_products": prepared_products,
+        "fullboxes": load_result["fullboxes"].copy(),
+        "packages": load_result["packages"].copy(),
+    }
+
+
+def _get_spec_search_data() -> dict[str, Any]:
+    return _load_spec_search_data(_master_cache_key())
+
+
+def _to_float_or_none(value: Any) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+        num = float(value)
+        if num != num:
+            return None
+        return round(num, 3)
+    except Exception:
+        return None
+
+
+def _to_int_or_none(value: Any) -> Optional[int]:
+    num = _to_float_or_none(value)
+    if num is None:
+        return None
+    if abs(num - round(num)) < 1e-9:
+        return int(round(num))
+    return int(num)
+
+
+def _to_bool_or_none(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    text = normalize_space(str(value or "")).lower()
+    if text in {"y", "yes", "true", "1"}:
+        return True
+    if text in {"n", "no", "false", "0"}:
+        return False
+    return None
+
+
+def _format_dimension_text(width: Optional[float], depth: Optional[float], height: Optional[float]) -> str:
+    values = [width, depth, height]
+    if any(value is None for value in values):
+        return ""
+
+    formatted = []
+    for value in values:
+        assert value is not None
+        if abs(value - round(value)) < 1e-9:
+            formatted.append(str(int(round(value))))
+        else:
+            formatted.append(f"{value:.1f}".rstrip("0").rstrip("."))
+
+    return " X ".join(formatted)
+
+
+def _records_from_frame(frame: Any) -> list[dict[str, Any]]:
+    if hasattr(frame, "to_dict"):
+        return frame.to_dict(orient="records")
+    return list(frame or [])
+
+
+def _find_best_row(records: list[dict[str, Any]], query: str, product_code: str, product_name: str) -> dict[str, Any]:
+    query_code = normalize_code(query)
+    target_name = compact_name(product_name)
+
+    for row in records:
+        if normalize_code(row.get("상품코드")) == product_code and product_code:
+            return row
+
+    for row in records:
+        if compact_name(row.get("국문상품명", "")) == target_name and target_name:
+            return row
+
+    for row in records:
+        if normalize_code(row.get("상품코드")) == query_code and query_code:
+            return row
+
+    return {}
+
+
+def _build_item_spec_payload(row: dict[str, Any]) -> dict[str, Any]:
+    if not row:
+        return {}
+
+    width = _to_float_or_none(row.get("가로(cm)"))
+    depth = _to_float_or_none(row.get("세로(cm)"))
+    height = _to_float_or_none(row.get("높이(cm)"))
+
+    return {
+        "product_code": normalize_space(str(row.get("상품코드", "") or "")),
+        "product_name": normalize_space(str(row.get("국문상품명", "") or "")),
+        "dimension_width_cm": width,
+        "dimension_depth_cm": depth,
+        "dimension_height_cm": height,
+        "dimensions_cm_text": _format_dimension_text(width, depth, height),
+        "unit_weight_kg": _to_float_or_none(row.get("개당중량(kg)")),
+        "package_product": _to_bool_or_none(row.get("패키지상품여부")),
+        "packing_policy_code": normalize_space(str(row.get("패킹정책코드", "") or "")),
+        "preferred_box_code": normalize_space(str(row.get("특수우선박스코드", "") or "")),
+        "preferred_box_qty": _to_int_or_none(row.get("특수우선입수량")),
+        "special_group": normalize_space(str(row.get("특수상품군", "") or "")),
+    }
+
+
+def _build_fullbox_spec_payload(row: dict[str, Any]) -> dict[str, Any]:
+    if not row:
+        return {}
+
+    width = _to_float_or_none(row.get("완박스가로(cm)"))
+    depth = _to_float_or_none(row.get("완박스세로(cm)"))
+    height = _to_float_or_none(row.get("완박스높이(cm)"))
+
+    return {
+        "product_code": normalize_space(str(row.get("상품코드", "") or "")),
+        "product_name": normalize_space(str(row.get("국문상품명", "") or "")),
+        "units_per_box": _to_int_or_none(row.get("완박스입수량")),
+        "box_code": normalize_space(str(row.get("완박스박스코드", "") or "")),
+        "box_name": normalize_space(str(row.get("완박스박스명", "") or "")),
+        "dimension_width_cm": width,
+        "dimension_depth_cm": depth,
+        "dimension_height_cm": height,
+        "dimensions_cm_text": _format_dimension_text(width, depth, height),
+        "box_weight_kg": _to_float_or_none(row.get("완박스중량(kg)")),
+        "mixed_fullbox_allowed": _to_bool_or_none(row.get("혼합완박스허용여부")),
+        "mixed_fullbox_group": normalize_space(str(row.get("완박스혼합그룹", "") or "")),
+    }
+
+
+def lookup_product_specs(query: str) -> ProductSpecResponse:
+    raw_query = normalize_space(query)
+    if not raw_query:
+        return ProductSpecResponse(
+            success=False,
+            query="",
+            match_status="unresolved",
+            message="상품코드 또는 상품명을 입력해주세요.",
+        )
+
+    search_data = _get_spec_search_data()
+    matcher = ProductMatcher(
+        products_data=search_data["prepared_products"],
+        fullboxes_data=search_data["fullboxes"],
+        packages_data=search_data["packages"],
+    )
+
+    status, selected, candidates, message = matcher.match(raw_query)
+    response = ProductSpecResponse(
+        success=status == "matched" and selected is not None,
+        query=raw_query,
+        match_status=status,
+        message=message,
+        candidates=[
+            {
+                "source": candidate.source,
+                "product_code": candidate.product_code,
+                "product_name": candidate.product_name,
+                "reason": candidate.reason,
+                "score": candidate.score,
+            }
+            for candidate in candidates[:5]
+        ],
+    )
+
+    if not selected:
+        return response
+
+    products_records = _records_from_frame(search_data["prepared_products"])
+    fullbox_records = _records_from_frame(search_data["fullboxes"])
+
+    item_row = _find_best_row(
+        records=products_records,
+        query=raw_query,
+        product_code=selected.product_code,
+        product_name=selected.product_name,
+    )
+    fullbox_row = _find_best_row(
+        records=fullbox_records,
+        query=raw_query,
+        product_code=selected.product_code,
+        product_name=selected.product_name,
+    )
+
+    response.matched_code = selected.product_code
+    response.matched_name = selected.product_name
+    response.match_source = selected.source
+    response.match_reason = selected.reason
+    response.item_spec = _build_item_spec_payload(item_row)
+    response.fullbox_spec = _build_fullbox_spec_payload(fullbox_row)
+
+    return response
+
+
 @app.get("/")
 def root():
     return {
@@ -374,6 +612,21 @@ def health():
         "status": "ok",
         "version": "1.1.0"
     }
+
+
+@app.post("/product-spec", response_model=ProductSpecResponse, operation_id="product_spec_lookup_post")
+def product_spec_lookup(request: ProductSpecRequest):
+    try:
+        return lookup_product_specs(request.query)
+    except Exception as e:
+        print("\n[PRODUCT SPEC LOOKUP EXCEPTION]")
+        print(traceback.format_exc())
+        return ProductSpecResponse(
+            success=False,
+            query=normalize_space(request.query),
+            match_status="error",
+            message=str(e),
+        )
 
 
 @app.post("/pack", response_model=PackResponse, operation_id="pack_pack_post")

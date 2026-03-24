@@ -35,9 +35,8 @@
               <label class="field">
                 <span>출고 방법</span>
                 <select id="shippingMethod" name="shippingMethod">
-                  <option value="">자동 판별</option>
+                  <option value="재포장" selected>재포장</option>
                   <option value="완박스">완박스</option>
-                  <option value="재포장">재포장</option>
                 </select>
               </label>
 
@@ -56,7 +55,7 @@
                 id="orderText"
                 name="orderText"
                 rows="14"
-                placeholder="예시&#10;완박스&#10;패킹리스트 no&#10;1. 레드톡스 100u / 10&#10;2. 리체스 TX100 / 50"
+                placeholder="예시&#10;재포장&#10;패킹리스트 no&#10;1. 레드톡스 100u / 10&#10;2. A100110 / 15"
               ></textarea>
             </label>
 
@@ -64,7 +63,9 @@
               <p class="helper-title">입력 형식 예시</p>
               <ul class="helper-list">
                 <li>`상품명 / 수량`</li>
+                <li>`상품코드 / 수량`</li>
                 <li>`상품명 수량`</li>
+                <li>`상품코드 수량`</li>
                 <li>앞에 `완박스`, `재포장`, `패킹리스트 yes/no` 줄이 있어도 됩니다.</li>
               </ul>
             </div>
@@ -75,6 +76,50 @@
               <button id="resetBtn" class="secondary-button" type="button">초기화</button>
             </div>
           </form>
+
+          <section class="spec-check-panel">
+            <div class="panel-header">
+              <h2>상품 스펙 체크</h2>
+              <span id="specStatusBadge" class="status-badge idle">대기 중</span>
+            </div>
+
+            <form id="specForm" class="form-stack">
+              <label class="field">
+                <span>상품코드 또는 상품명</span>
+                <input
+                  id="specQuery"
+                  name="specQuery"
+                  type="text"
+                  placeholder="예시: A100110 또는 레드톡스 100u"
+                />
+              </label>
+
+              <div class="button-row">
+                <button id="specSubmitBtn" class="primary-button" type="submit">상품 스펙 조회</button>
+              </div>
+            </form>
+
+            <div class="spec-summary-card">
+              <p class="helper-title">조회 결과</p>
+              <p id="specSummary" class="spec-summary-text">아직 조회한 상품이 없습니다.</p>
+            </div>
+
+            <div class="spec-grid">
+              <section class="spec-card">
+                <h3>낱개 스펙</h3>
+                <dl id="itemSpecList" class="spec-list">
+                  <div class="spec-empty">아직 조회한 상품이 없습니다.</div>
+                </dl>
+              </section>
+
+              <section class="spec-card">
+                <h3>완박스 스펙</h3>
+                <dl id="fullboxSpecList" class="spec-list">
+                  <div class="spec-empty">아직 조회한 상품이 없습니다.</div>
+                </dl>
+              </section>
+            </div>
+          </section>
         </section>
 
         <section class="panel result-panel">

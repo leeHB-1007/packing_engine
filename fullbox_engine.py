@@ -445,6 +445,313 @@ def _build_repack_or_failed(remainders: List[dict], rules: dict) -> List[dict]:
     return result
 
 
+def _build_fullbox_carton_lookup(fullboxes_df: pd.DataFrame | None) -> Dict[str, dict]:
+    lookup: Dict[str, dict] = {}
+    if fullboxes_df is None or len(fullboxes_df) == 0:
+        return lookup
+
+    for _, row in fullboxes_df.iterrows():
+        box_code = _norm_text(row.get(_norm_col("완박스박스코드"), ""))
+        if not box_code or box_code in lookup:
+            continue
+
+        outer_l = _to_float(row.get(_norm_col("완박스가로(cm)"), 0))
+        outer_w = _to_float(row.get(_norm_col("완박스세로(cm)"), 0))
+        outer_h = _to_float(row.get(_norm_col("완박스높이(cm)"), 0))
+        if min(outer_l, outer_w, outer_h) <= 0:
+            continue
+
+        lookup[box_code] = {
+            "박스코드": box_code,
+            "박스명": _norm_text(row.get(_norm_col("완박스박스명"), "")),
+            "외경가로(cm)": outer_l,
+            "외경세로(cm)": outer_w,
+            "외경높이(cm)": outer_h,
+            # inner dims are approximated because fullboxes master has only carton outer dims.
+            "내경가로(cm)": outer_l,
+            "내경세로(cm)": outer_w,
+            "내경높이(cm)": outer_h,
+            "박스중량(kg)": 0.0,
+            "최대허용중량(kg)": 30.0,
+            "박스정렬우선순위": 0.0,
+        }
+
+    return lookup
+
+
+def _build_fixed_box_mix_candidates(remainders: List[dict]) -> Tuple[List[dict], Dict[str, dict]]:
+    candidates: List[dict] = []
+    candidate_lookup: Dict[str, dict] = {}
+
+    for item in remainders:
+        qty = int(item.get("qty", 0) or 0)
+        product = item.get("product", {}) or {}
+        if qty <= 0:
+            continue
+
+        product_name = _norm_text(product.get("국문상품명", ""))
+        length_cm = _to_float(product.get("가로(cm)"), 0)
+        width_cm = _to_float(product.get("세로(cm)"), 0)
+        height_cm = _to_float(product.get("높이(cm)"), 0)
+        unit_weight_kg = _to_float(product.get("개당중량(kg)"), 0)
+
+        if not product_name or min(length_cm, width_cm, height_cm, unit_weight_kg) <= 0:
+            return [], {}
+
+        candidate = {
+            "product_name": product_name,
+            "qty": qty,
+            "original_qty": qty,
+            "package_pack_qty": 1,
+            "calc_unit_type": "item",
+            "length_cm": length_cm,
+            "width_cm": width_cm,
+            "height_cm": height_cm,
+            "unit_weight_kg": unit_weight_kg,
+            "special_group": _norm_text(product.get("특수상품군", "")),
+            "package_product": bool(product.get("패키지상품여부", False)),
+            "packing_policy_code": _norm_text(product.get("패킹정책코드", "")),
+            "fullbox_pack_limit": int(product.get("완박스입수량", 0) or 0),
+            "source_reason": item.get("reason", ""),
+            "spec_source": "products_master",
+        }
+        candidates.append(candidate)
+        candidate_lookup[product_name] = candidate
+
+    return candidates, candidate_lookup
+
+
+def _calc_min_layer_height_for_qty(layer_variants: List[dict], target_qty: int) -> float | None:
+    target_qty = int(target_qty or 0)
+    if target_qty <= 0:
+        return 0.0
+
+    inf = 10**9
+    dp = [inf] * (target_qty + 1)
+    dp[0] = 0
+
+    parsed_variants = []
+    for variant in layer_variants or []:
+        count_per_layer = int(variant.get("count_per_layer", variant.get("count", 0)) or 0)
+        layer_height_tenth_cm = int(round(float(variant.get("layer_height_cm", 0) or 0) * 10))
+        if count_per_layer <= 0 or layer_height_tenth_cm <= 0:
+            continue
+        parsed_variants.append((count_per_layer, layer_height_tenth_cm))
+
+    if not parsed_variants:
+        return None
+
+    for filled_qty in range(target_qty + 1):
+        if dp[filled_qty] >= inf:
+            continue
+        for count_per_layer, layer_height_tenth_cm in parsed_variants:
+            next_qty = min(target_qty, filled_qty + count_per_layer)
+            next_height = dp[filled_qty] + layer_height_tenth_cm
+            if next_height < dp[next_qty]:
+                dp[next_qty] = next_height
+
+    if dp[target_qty] >= inf:
+        return None
+
+    return dp[target_qty] / 10.0
+
+
+def _can_fit_mixed_partial_fullbox_carton_by_layers(
+    remainders: List[dict],
+    candidate_lookup: Dict[str, dict],
+    selected_box: dict,
+    rules: dict,
+) -> bool:
+    from repack_engine import _calc_best_orientation_fit
+
+    layer_groups: Dict[Tuple, dict] = {}
+    total_weight_kg = 0.0
+
+    for item in remainders:
+        qty = int(item.get("qty", 0) or 0)
+        product = item.get("product", {}) or {}
+        product_name = _norm_text(product.get("국문상품명", ""))
+        if qty <= 0 or not product_name:
+            continue
+
+        meta = candidate_lookup.get(product_name, {}) or {}
+        total_weight_kg += qty * float(meta.get("unit_weight_kg", 0) or 0)
+
+        group_key = (
+            round(float(meta.get("length_cm", 0) or 0), 3),
+            round(float(meta.get("width_cm", 0) or 0), 3),
+            round(float(meta.get("height_cm", 0) or 0), 3),
+            _norm_text(product.get("완박스박스코드", "")),
+        )
+        if group_key not in layer_groups:
+            layer_groups[group_key] = {
+                "qty": 0,
+                "candidate": meta,
+                "pack_limit": int(product.get("완박스입수량", 0) or 0),
+            }
+        layer_groups[group_key]["qty"] += qty
+        pack_limit = int(product.get("완박스입수량", 0) or 0)
+        if pack_limit > 0:
+            current_limit = int(layer_groups[group_key]["pack_limit"] or 0)
+            if current_limit <= 0:
+                layer_groups[group_key]["pack_limit"] = pack_limit
+            else:
+                layer_groups[group_key]["pack_limit"] = min(current_limit, pack_limit)
+
+    effective_weight_capacity = min(
+        float(selected_box["최대허용중량(kg)"]),
+        float(rules.get("BOX_MAX_WEIGHT_KG", 30)),
+    ) - float(selected_box["박스중량(kg)"])
+    if total_weight_kg > effective_weight_capacity + 1e-9:
+        return False
+
+    inner_height_cm = float(selected_box["내경높이(cm)"])
+    layer_tol_cm = float(rules.get("FULLBOX_MIX_LAYER_TOL_CM", 1.0) or 1.0)
+    used_height_cm = 0.0
+
+    for group in layer_groups.values():
+        fit_info = _calc_best_orientation_fit(selected_box, group["candidate"], group["qty"], rules)
+        physical_max_units = int(fit_info.get("global_best_max_units_per_box", 0) or 0)
+        pack_limit = int(group.get("pack_limit", 0) or 0)
+        effective_cap = min(physical_max_units, pack_limit) if pack_limit > 0 else physical_max_units
+
+        if effective_cap <= 0 or int(group["qty"]) > effective_cap:
+            return False
+
+        layer_variants = ((fit_info.get("fit_result") or {}).get("layer_variants") or [])
+        min_height_cm = _calc_min_layer_height_for_qty(layer_variants, int(group["qty"]))
+        if min_height_cm is None:
+            return False
+
+        used_height_cm += float(min_height_cm)
+
+    return used_height_cm <= (inner_height_cm + layer_tol_cm)
+
+
+def _try_allocate_mixed_partial_fullbox_carton(
+    remainders: List[dict],
+    rules: dict,
+    fallback_fullboxes_df: pd.DataFrame | None = None,
+    shipping_method: str = "auto",
+) -> Tuple[List[dict], List[dict]]:
+    fullbox_mode = str(shipping_method or "").strip().lower() == "fullbox"
+    if not fullbox_mode or not remainders:
+        return remainders, []
+
+    carton_lookup = _build_fullbox_carton_lookup(fallback_fullboxes_df)
+    if not carton_lookup:
+        return remainders, []
+
+    candidates, candidate_lookup = _build_fixed_box_mix_candidates(remainders)
+    if not candidates:
+        return remainders, []
+
+    candidate_box_codes = []
+    for item in remainders:
+        product = item.get("product", {}) or {}
+        box_code = _norm_text(product.get("완박스박스코드", ""))
+        if box_code and box_code in carton_lookup and box_code not in candidate_box_codes:
+            candidate_box_codes.append(box_code)
+
+    candidate_box_codes.sort(
+        key=lambda code: (
+            carton_lookup[code]["외경가로(cm)"] * carton_lookup[code]["외경세로(cm)"] * carton_lookup[code]["외경높이(cm)"],
+            code,
+        )
+    )
+
+    if not candidate_box_codes:
+        return remainders, []
+
+    best_box = None
+
+    for box_code in candidate_box_codes:
+        selected_box = carton_lookup[box_code]
+        if _can_fit_mixed_partial_fullbox_carton_by_layers(
+            remainders=remainders,
+            candidate_lookup=candidate_lookup,
+            selected_box=selected_box,
+            rules=rules,
+        ):
+            best_box = selected_box
+            break
+
+    if not best_box:
+        return remainders, []
+
+    allocation = {
+        "type": "mixed_partial_fullbox_carton",
+        "box_code": best_box["박스코드"],
+        "box_name": best_box["박스명"],
+        "pack_size": 0,
+        "gross_weight_kg": round(
+            sum(
+                int(item.get("qty", 0) or 0)
+                * float(candidate_lookup.get(_norm_text((item.get("product") or {}).get("국문상품명", "")), {}).get("unit_weight_kg", 0) or 0)
+                for item in remainders
+            ),
+            3,
+        ),
+        "items": [
+            {
+                "product_name": alloc.get("product_name", ""),
+                "qty": int(alloc.get("qty", 0) or 0),
+            }
+            for alloc in [
+                {
+                    "product_name": _norm_text((item.get("product") or {}).get("국문상품명", "")),
+                    "qty": int(item.get("qty", 0) or 0),
+                }
+                for item in remainders
+            ]
+        ],
+    }
+
+    return [], [allocation]
+
+
+def _allocate_partial_fullbox_cartons(
+    remainders: List[dict],
+    shipping_method: str = "auto",
+) -> Tuple[List[dict], List[dict]]:
+    fullbox_mode = str(shipping_method or "").strip().lower() == "fullbox"
+    if not fullbox_mode:
+        return remainders, []
+
+    allocations = []
+    remaining = []
+
+    for item in remainders:
+        qty = int(item.get("qty", 0))
+        product = item.get("product", {}) or {}
+
+        if qty <= 0:
+            continue
+
+        if not _is_fullbox_candidate(product):
+            remaining.append(item)
+            continue
+
+        gross_weight = round(float(product.get("개당중량(kg)", 0) or 0) * qty, 3)
+        allocations.append(
+            {
+                "type": "partial_fullbox_carton",
+                "box_code": product["완박스박스코드"],
+                "box_name": product["완박스박스명"],
+                "pack_size": int(product.get("완박스입수량", 0) or 0),
+                "gross_weight_kg": gross_weight,
+                "items": [
+                    {
+                        "product_name": product["국문상품명"],
+                        "qty": qty,
+                    }
+                ],
+            }
+        )
+
+    return remaining, allocations
+
+
 def resolve_orders(
     order_lines: List[OrderLine],
     prepared_products_df: pd.DataFrame,
@@ -512,16 +819,30 @@ def run_fullbox_engine(
         shipping_method=shipping_method,
     )
 
-    for item in mix_candidates:
+    partial_fullbox_inputs = direct_repack + mix_candidates
+    partial_fullbox_inputs, mixed_partial_fullbox_allocations = _try_allocate_mixed_partial_fullbox_carton(
+        partial_fullbox_inputs,
+        rules,
+        fallback_fullboxes_df=fallback_fullboxes_df,
+        shipping_method=shipping_method,
+    )
+    partial_fullbox_inputs, partial_fullbox_allocations = _allocate_partial_fullbox_cartons(
+        partial_fullbox_inputs,
+        shipping_method=shipping_method,
+    )
+
+    for item in partial_fullbox_inputs:
         if int(item["qty"]) > 0 and not item.get("reason"):
             item["reason"] = "FULLBOX_MIX_REMAINDER"
 
-    repack_or_failed = _build_repack_or_failed(direct_repack + mix_candidates, rules)
+    repack_or_failed = _build_repack_or_failed(partial_fullbox_inputs, rules)
 
     return {
         "single_fullboxes": single_allocations,
         "group_mixed_fullboxes": group_mix_allocations,
         "tolerance_mixed_fullboxes": tol_mix_allocations,
+        "mixed_partial_fullbox_cartons": mixed_partial_fullbox_allocations,
+        "partial_fullbox_cartons": partial_fullbox_allocations,
         "remainders": repack_or_failed,
         "not_found": not_found,
     }
@@ -545,6 +866,18 @@ def print_fullbox_result(result: Dict[str, List[dict]]) -> None:
 
     print("\n[tolerance_mixed_fullboxes]")
     for i, box in enumerate(result["tolerance_mixed_fullboxes"], start=1):
+        print(f"{i}. {box['box_name']} ({box['box_code']})")
+        for item in box["items"]:
+            print(f"   - {item['product_name']}: {item['qty']}")
+
+    print("\n[mixed_partial_fullbox_cartons]")
+    for i, box in enumerate(result.get("mixed_partial_fullbox_cartons", []), start=1):
+        print(f"{i}. {box['box_name']} ({box['box_code']})")
+        for item in box["items"]:
+            print(f"   - {item['product_name']}: {item['qty']}")
+
+    print("\n[partial_fullbox_cartons]")
+    for i, box in enumerate(result.get("partial_fullbox_cartons", []), start=1):
         print(f"{i}. {box['box_name']} ({box['box_code']})")
         for item in box["items"]:
             print(f"   - {item['product_name']}: {item['qty']}")

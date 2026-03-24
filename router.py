@@ -50,6 +50,9 @@ def normalize_order_item(item):
         or item.get("name")
         or item.get("상품명")
         or item.get("product")
+        or item.get("product_code")
+        or item.get("code")
+        or item.get("상품코드")
     )
 
     qty = (
@@ -88,7 +91,7 @@ def normalize_shipping_method(value):
         return "fullbox"
     if text in {"재포장", "repack", "re-pack", "re_pack"}:
         return "repack"
-    return "auto"
+    return "repack"
 
 
 def import_module_safely(module_name):
@@ -775,7 +778,7 @@ def run_fixed_box_mix_checker(order_items, debug=False):
     return try_call_with_payload_variants(func, payload_variants)
 
 
-def run_main_packing_engine(order_items, debug=False, shipping_method="auto"):
+def run_main_packing_engine(order_items, debug=False, shipping_method="repack"):
     module = import_module_safely("run_packing_engine")
 
     candidate_names = [
@@ -799,7 +802,7 @@ def run_main_packing_engine(order_items, debug=False, shipping_method="auto"):
     return call_function_flexibly(func, payload)
 
 
-def route_packing(order_items, debug=False, shipping_method="auto"):
+def route_packing(order_items, debug=False, shipping_method="repack"):
     order_items = normalize_order_items(order_items)
     shipping_method = normalize_shipping_method(shipping_method)
 

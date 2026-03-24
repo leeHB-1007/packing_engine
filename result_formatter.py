@@ -174,6 +174,59 @@ def _build_cut_box_display(box_label: str, outer_dims: Any, cut_height: Any, tri
 def _collect_rows(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
 
+    mixed_repack_boxes = result.get("mixed_repack_boxes") or []
+    if isinstance(mixed_repack_boxes, list):
+        for mixed_box in mixed_repack_boxes:
+            if not isinstance(mixed_box, dict):
+                continue
+
+            box_code = mixed_box.get("box_code")
+            box_name = mixed_box.get("box_name")
+            outer_dims = mixed_box.get("outer_size_cm")
+            inner_dims = mixed_box.get("inner_size_cm")
+
+            if box_name and box_code:
+                box_label = f"{box_name} ({box_code})"
+            elif box_name:
+                box_label = str(box_name)
+            elif box_code:
+                box_label = str(box_code)
+            else:
+                box_label = "박스정보없음"
+
+            for item in mixed_box.get("items", []) or []:
+                if not isinstance(item, dict):
+                    continue
+
+                rows.append(
+                    {
+                        "product_name": str(item.get("product_name", "상품명없음")),
+                        "box_label": box_label,
+                        "box_no": mixed_box.get("box_no", 1),
+                        "box_count": 1,
+                        "input_qty": item.get("original_qty", item.get("qty")),
+                        "calc_qty": item.get("qty"),
+                        "calc_unit": _unit_label(item.get("calc_unit_type", "ea")),
+                        "package_in_qty": item.get("package_pack_qty"),
+                        "estimated_weight": mixed_box.get("gross_weight_est"),
+                        "per_layer": None,
+                        "layers": None,
+                        "used_height": None,
+                        "remaining_height": None,
+                        "cut_height": None,
+                        "post_cut_outer_height": None,
+                        "post_cut_inner_height": None,
+                        "note": mixed_box.get("note", ""),
+                        "max_capacity": None,
+                        "recommended_capacity": None,
+                        "recommended_rotation": None,
+                        "max_rotation": None,
+                        "spec_source": "",
+                        "outer_dims": outer_dims,
+                        "inner_dims": inner_dims,
+                    }
+                )
+
     final_plans = result.get("final_plans") or []
     if not isinstance(final_plans, list):
         return rows
