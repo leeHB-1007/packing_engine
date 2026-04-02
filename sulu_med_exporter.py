@@ -59,7 +59,7 @@ def _fmt_weight(value: Any) -> float | None:
     if value in (None, ""):
         return None
     num = _to_float(value, 0.0)
-    return round(num, 3)
+    return round(num, 1)
 
 
 def _normalize_calc_unit(value: Any) -> str:
@@ -69,7 +69,11 @@ def _normalize_calc_unit(value: Any) -> str:
     return "item"
 
 
-def _format_box_size(outer_dims: Any, trimmed_outer_height: Any = None) -> str:
+def _format_box_size(
+    outer_dims: Any,
+    trimmed_outer_height: Any = None,
+    display_trimmed_height: bool = True,
+) -> str:
     if not isinstance(outer_dims, (list, tuple)) or len(outer_dims) < 3:
         return ""
 
@@ -78,7 +82,7 @@ def _format_box_size(outer_dims: Any, trimmed_outer_height: Any = None) -> str:
     height = _to_float(outer_dims[2], 0.0)
 
     trimmed_height = _to_float(trimmed_outer_height, 0.0)
-    if trimmed_height > 0 and trimmed_height < height:
+    if display_trimmed_height and trimmed_height > 0 and trimmed_height < height:
         height = trimmed_height
 
     return f"{_fmt_num(length)} X {_fmt_num(width)} X {_fmt_num(height)}"
@@ -194,9 +198,7 @@ def _format_packing_unit_display(
     alloc_qty: int,
 ) -> Any:
     if _normalize_calc_unit(calc_unit_type) == "package":
-        if alloc_qty <= 1:
-            return package_pack_qty
-        return f"{package_pack_qty} x {alloc_qty}"
+        return package_pack_qty * alloc_qty
     return alloc_qty
 
 
@@ -370,7 +372,11 @@ def _build_repack_groups(
 
         groups.append(
             _new_export_group(
-                box_size_cm=_format_box_size(mixed_box.get("outer_size_cm", ())),
+                box_size_cm=_format_box_size(
+                    mixed_box.get("outer_size_cm", ()),
+                    mixed_box.get("trimmed_outer_height_cm"),
+                    bool(mixed_box.get("display_trimmed_height", False)),
+                ),
                 box_no=next_box_no,
                 box_count=1,
                 each_qty=each_qty,
@@ -411,6 +417,7 @@ def _build_repack_groups(
             box_size_cm = _format_box_size(
                 box_line.get("outer_size_cm", plan.get("outer_size_cm", ())),
                 box_line.get("trimmed_outer_height_cm"),
+                bool(box_line.get("display_trimmed_height", False)),
             )
 
             groups.append(
@@ -458,11 +465,14 @@ def _build_fixed_box_mix_groups(
             package_pack_qty = _to_int(item.get("package_pack_qty"), 1)
             alloc_qty = _to_int(item.get("qty"), 0)
 
+            packing_unit = _format_packing_unit_display(
+                calc_unit_type=calc_unit_type,
+                package_pack_qty=package_pack_qty,
+                alloc_qty=alloc_qty,
+            )
             if calc_unit_type == "package":
-                packing_unit = package_pack_qty
                 line_each_qty = alloc_qty * package_pack_qty
             else:
-                packing_unit = alloc_qty
                 line_each_qty = alloc_qty
 
             each_qty += line_each_qty
@@ -747,7 +757,7 @@ def _write_sheet1_rows(ws, groups: List[dict], shipment_mark: str = "") -> None:
             cell = ws.cell(row=start_row, column=col_idx, value=value)
             _style_data_cell(cell, fill_color)
             if col_idx in {9, 10} and value not in ("", None):
-                cell.number_format = "0.###"
+                cell.number_format = "0.0"
             if col_idx == 11:
                 cell.alignment = Alignment(horizontal="left", vertical="center")
             if span > 1:
@@ -782,8 +792,8 @@ def _write_sheet1_rows(ws, groups: List[dict], shipment_mark: str = "") -> None:
     ws.cell(row=total_row, column=3, value="총합계")
     ws.cell(row=total_row, column=7, value=total_box_count)
     ws.cell(row=total_row, column=8, value=total_each_qty)
-    ws.cell(row=total_row, column=10, value=round(total_weight, 3))
-    ws.cell(row=total_row, column=10).number_format = "0.###"
+    ws.cell(row=total_row, column=10, value=round(total_weight, 1))
+    ws.cell(row=total_row, column=10).number_format = "0.0"
     for col_idx in (3, 7, 8, 10):
         ws.cell(row=total_row, column=col_idx).font = Font(bold=True)
     ws.row_dimensions[total_row].height = 26

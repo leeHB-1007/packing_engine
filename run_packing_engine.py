@@ -156,6 +156,76 @@ def build_forced_repack_fullbox_result(
     return result
 
 
+def _build_fullbox_display_rows(fullbox_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+
+    allocation_keys = [
+        "single_fullboxes",
+        "group_mixed_fullboxes",
+        "tolerance_mixed_fullboxes",
+        "mixed_partial_fullbox_cartons",
+        "partial_fullbox_cartons",
+    ]
+
+    for key in allocation_keys:
+        allocations = fullbox_result.get(key) or []
+        if not isinstance(allocations, list):
+            continue
+
+        for allocation in allocations:
+            if not isinstance(allocation, dict):
+                continue
+
+            box_code = allocation.get("box_code")
+            box_name = allocation.get("box_name")
+            if box_name and box_code:
+                box_label = f"{box_name} ({box_code})"
+            elif box_name:
+                box_label = str(box_name)
+            elif box_code:
+                box_label = str(box_code)
+            else:
+                box_label = "박스정보없음"
+
+            note = str(allocation.get("type", "") or "").replace("_", " ").strip()
+
+            for item in allocation.get("items", []) or []:
+                if not isinstance(item, dict):
+                    continue
+
+                qty = item.get("qty")
+                rows.append(
+                    {
+                        "product_name": str(item.get("product_name", "상품명없음")),
+                        "box_label": box_label,
+                        "box_no": None,
+                        "box_count": 1,
+                        "input_qty": qty,
+                        "calc_qty": qty,
+                        "calc_unit": "ea",
+                        "package_in_qty": None,
+                        "estimated_weight": None,
+                        "per_layer": None,
+                        "layers": None,
+                        "used_height": None,
+                        "remaining_height": None,
+                        "cut_height": None,
+                        "post_cut_outer_height": None,
+                        "post_cut_inner_height": None,
+                        "note": note,
+                        "max_capacity": None,
+                        "recommended_capacity": None,
+                        "recommended_rotation": None,
+                        "max_rotation": None,
+                        "spec_source": "fullboxes_master",
+                        "outer_dims": None,
+                        "inner_dims": None,
+                    }
+                )
+
+    return rows
+
+
 def run_packing_engine(
     order_lines: List[Any],
     packing_list_needed: Any = False,
@@ -261,6 +331,7 @@ def run_packing_engine(
     )
 
     final_result["not_found"] = fullbox_result.get("not_found", [])
+    final_result["fullbox_display_rows"] = _build_fullbox_display_rows(fullbox_result)
 
     formatted_text = format_engine_result(
         final_result,

@@ -63,6 +63,33 @@ def _rule_int(value, default: int = 0) -> int:
         return default
 
 
+BOX_CAP_POLICY_MAP: Dict[str, Dict[str, int]] = {
+    "BOX_CAP_BX010_300_BX008_200": {
+        "BX010": 300,
+        "BX008": 200,
+    },
+}
+
+
+def _resolve_box_cap_override(item: dict | None, box_code: Any) -> int | None:
+    if not isinstance(item, dict):
+        return None
+
+    policy_code = _norm_text(item.get("packing_policy_code", "")).upper()
+    if not policy_code:
+        return None
+
+    box_caps = BOX_CAP_POLICY_MAP.get(policy_code)
+    if not box_caps:
+        return None
+
+    normalized_box_code = _norm_text(box_code).upper()
+    cap = box_caps.get(normalized_box_code)
+    if cap is None:
+        return None
+    return max(0, int(cap))
+
+
 @dataclass
 class RepackCandidate:
     product_name: str
@@ -80,6 +107,11 @@ class RepackCandidate:
     source_reason: str
     spec_source: str
     candidate_note: str = ""
+    mixed_unpack_allowed: bool = False
+    fallback_item_length_cm: float = 0.0
+    fallback_item_width_cm: float = 0.0
+    fallback_item_height_cm: float = 0.0
+    fallback_item_unit_weight_kg: float = 0.0
 
 
 def _build_product_lookup(prepared_products_df: pd.DataFrame) -> Dict[str, dict]:
@@ -113,7 +145,7 @@ def _build_product_lookup(prepared_products_df: pd.DataFrame) -> Dict[str, dict]
     return lookup
 
 
-def _build_fullbox_only_product_lookup(fullboxes_df: pd.DataFrame | None) -> Dict[str, dict]:
+def _build_fullbox_package_lookup(fullboxes_df: pd.DataFrame | None) -> Dict[str, dict]:
     if fullboxes_df is None or len(fullboxes_df) == 0:
         return {}
 
@@ -125,18 +157,69 @@ def _build_fullbox_only_product_lookup(fullboxes_df: pd.DataFrame | None) -> Dic
         if not name:
             continue
 
+        product_code = _norm_text(row.get(_norm_col("상품코드"), ""))
+        payload = {
+            "상품코드": _norm_text(row.get(_norm_col("상품코드"), "")),
+            "국문상품명": name,
+            "완박스입수량": _to_float(row.get(_norm_col("완박스입수량"), 0)),
+            "완박스가로(cm)": _to_float(row.get(_norm_col("완박스가로(cm)"), 0)),
+            "완박스세로(cm)": _to_float(row.get(_norm_col("완박스세로(cm)"), 0)),
+            "완박스높이(cm)": _to_float(row.get(_norm_col("완박스높이(cm)"), 0)),
+            # fullboxes_master weight means gross weight for the fullbox package,
+            # not per-item weight.
+            "완박스중량(kg)": _to_float(row.get(_norm_col("완박스중량(kg)"), 0)),
+        }
+
+        lookup[f"name::{name}"] = payload
+        lookup[f"name_nospace::{name.replace(' ', '')}"] = payload
+        if product_code:
+            lookup[f"code::{product_code}"] = payload
+
+    return lookup
+
+
+def _find_fullbox_package_spec(product_name: str, product_code: str, fullbox_lookup: Dict[str, dict]) -> dict | None:
+    product_name = _norm_text(product_name)
+    product_code = _norm_text(product_code)
+    product_name_nospace = product_name.replace(" ", "")
+
+    if product_code and f"code::{product_code}" in fullbox_lookup:
+        return fullbox_lookup[f"code::{product_code}"]
+
+    if product_name and f"name::{product_name}" in fullbox_lookup:
+        return fullbox_lookup[f"name::{product_name}"]
+
+    if product_name_nospace and f"name_nospace::{product_name_nospace}" in fullbox_lookup:
+        return fullbox_lookup[f"name_nospace::{product_name_nospace}"]
+
+    return None
+
+
+def _build_package_only_product_lookup(prepared_packages_df: pd.DataFrame | None) -> Dict[str, dict]:
+    if prepared_packages_df is None or len(prepared_packages_df) == 0:
+        return {}
+
+    df = prepared_packages_df.copy()
+    lookup: Dict[str, dict] = {}
+
+    for _, row in df.iterrows():
+        name = _norm_text(row.get(_norm_col("국문상품명"), ""))
+        if not name:
+            continue
+
         lookup[name] = {
             "상품코드": _norm_text(row.get(_norm_col("상품코드"), "")),
             "국문상품명": name,
-            "가로(cm)": _to_float(row.get(_norm_col("완박스가로(cm)"), 0)),
-            "세로(cm)": _to_float(row.get(_norm_col("완박스세로(cm)"), 0)),
-            "높이(cm)": _to_float(row.get(_norm_col("완박스높이(cm)"), 0)),
-            # fullboxes-only fallback uses fullbox gross weight as a practical estimate.
-            "개당중량(kg)": _to_float(row.get(_norm_col("완박스중량(kg)"), 0)),
+            # packages_master only entries can still be packed as package units.
+            # Item-level remainder calc will remain unresolved if no item spec exists.
+            "가로(cm)": 0.0,
+            "세로(cm)": 0.0,
+            "높이(cm)": 0.0,
+            "개당중량(kg)": 0.0,
             "특수상품군": "",
-            "패키지상품여부": False,
-            "패킹정책코드": "",
-            "패키지정책참조": "",
+            "패키지상품여부": True,
+            "패킹정책코드": _norm_text(row.get(_norm_col("엔진기본처리정책"), "")),
+            "패키지정책참조": "packages_master",
         }
 
     return lookup
@@ -218,8 +301,13 @@ def _should_use_package_spec(product: dict, package_spec: dict | None) -> bool:
     package_flag = bool(product.get("패키지상품여부", False))
     packing_policy = _norm_text(product.get("패킹정책코드", "")).upper()
     source_ref = _norm_text(product.get("패키지정책참조", ""))
+    package_policy = _norm_text(package_spec.get("엔진기본처리정책", "")).upper()
 
-    return package_flag or packing_policy.startswith("PACKAGE_") or source_ref != ""
+    if package_flag or packing_policy.startswith("PACKAGE_") or source_ref != "":
+        return True
+
+    # If a validated packages_master row exists, prefer package-level packing by default.
+    return package_policy in {"PACKAGE_AS_IS_FIRST", "PACKAGE_SEALED", "PACKAGE_ONLY"} or True
 
 
 def _build_candidate_note(source_reason: str, candidate_kind: str) -> str:
@@ -274,9 +362,10 @@ def build_repack_candidates(
     fallback_fullboxes_df: pd.DataFrame | None = None,
 ) -> Dict[str, List[dict]]:
     product_lookup = _build_product_lookup(prepared_products_df)
-    for product_name, payload in _build_fullbox_only_product_lookup(fallback_fullboxes_df).items():
+    for product_name, payload in _build_package_only_product_lookup(prepared_packages_df).items():
         product_lookup.setdefault(product_name, payload)
     package_lookup = _build_package_lookup(prepared_packages_df)
+    fullbox_package_lookup = _build_fullbox_package_lookup(fallback_fullboxes_df)
 
     candidates: List[RepackCandidate] = []
     unresolved: List[dict] = []
@@ -294,14 +383,101 @@ def build_repack_candidates(
 
         product = product_lookup.get(product_name)
         if not product:
-            unresolved.append(
-                {
-                    "product_name": product_name,
-                    "qty": original_qty,
-                    "reason": "REPACK_PRODUCT_LOOKUP_FAILED",
-                    "source_reason": reason,
-                }
+            fullbox_package_spec = _find_fullbox_package_spec(
+                product_name=product_name,
+                product_code="",
+                fullbox_lookup=fullbox_package_lookup,
             )
+            if not fullbox_package_spec:
+                unresolved.append(
+                    {
+                        "product_name": product_name,
+                        "qty": original_qty,
+                        "reason": "REPACK_PRODUCT_LOOKUP_FAILED",
+                        "source_reason": reason,
+                    }
+                )
+                continue
+
+            fullbox_pack_qty = int(_to_float(fullbox_package_spec.get("완박스입수량", 0), 0))
+            package_qty = original_qty // fullbox_pack_qty if fullbox_pack_qty > 0 else 0
+            remainder_item_qty = original_qty % fullbox_pack_qty if fullbox_pack_qty > 0 else original_qty
+
+            package_length_cm = float(fullbox_package_spec.get("완박스가로(cm)", 0) or 0)
+            package_width_cm = float(fullbox_package_spec.get("완박스세로(cm)", 0) or 0)
+            package_height_cm = float(fullbox_package_spec.get("완박스높이(cm)", 0) or 0)
+            package_unit_weight_kg = float(fullbox_package_spec.get("완박스중량(kg)", 0) or 0)
+
+            if fullbox_pack_qty <= 0:
+                invalid_specs.append(
+                    {
+                        "product_name": product_name,
+                        "qty": original_qty,
+                        "reason": "INVALID_FULLBOX_PACK_QTY",
+                        "source_reason": reason,
+                        "length_cm": package_length_cm,
+                        "width_cm": package_width_cm,
+                        "height_cm": package_height_cm,
+                        "unit_weight_kg": package_unit_weight_kg,
+                        "spec_source": "fullboxes_master",
+                    }
+                )
+                continue
+
+            if (
+                package_length_cm <= 0
+                or package_width_cm <= 0
+                or package_height_cm <= 0
+                or package_unit_weight_kg <= 0
+            ):
+                invalid_specs.append(
+                    {
+                        "product_name": product_name,
+                        "qty": original_qty,
+                        "reason": "INVALID_FULLBOX_PACKAGE_SPEC",
+                        "source_reason": reason,
+                        "length_cm": package_length_cm,
+                        "width_cm": package_width_cm,
+                        "height_cm": package_height_cm,
+                        "unit_weight_kg": package_unit_weight_kg,
+                        "spec_source": "fullboxes_master",
+                    }
+                )
+                continue
+
+            if package_qty > 0:
+                candidates.append(
+                    RepackCandidate(
+                        product_name=product_name,
+                        qty=package_qty,
+                        original_qty=package_qty * fullbox_pack_qty,
+                        package_pack_qty=fullbox_pack_qty,
+                        calc_unit_type="package",
+                        length_cm=package_length_cm,
+                        width_cm=package_width_cm,
+                        height_cm=package_height_cm,
+                        unit_weight_kg=package_unit_weight_kg,
+                        special_group="",
+                        package_product=True,
+                        packing_policy_code="FULLBOX_PACKAGE_ONLY",
+                        source_reason=reason,
+                        spec_source="fullboxes_master",
+                        candidate_note=_build_candidate_note(reason, "package_unit"),
+                    )
+                )
+
+            if remainder_item_qty > 0:
+                unresolved.append(
+                    {
+                        "product_name": product_name,
+                        "qty": remainder_item_qty,
+                        "reason": "FULLBOX_ONLY_REMAINDER_SPEC_NOT_AVAILABLE",
+                        "source_reason": reason,
+                        "package_pack_qty": fullbox_pack_qty,
+                        "spec_source": "fullboxes_master",
+                    }
+                )
+
             continue
 
         package_spec = _find_package_spec(product, package_lookup)
@@ -340,6 +516,18 @@ def build_repack_candidates(
                 package_width_cm = float(package_spec["패키지세로(cm)"])
                 package_height_cm = float(package_spec["패키지높이(cm)"])
                 package_unit_weight_kg = float(package_spec["패키지중량(kg)"])
+                fallback_item_length_cm = float(product["가로(cm)"])
+                fallback_item_width_cm = float(product["세로(cm)"])
+                fallback_item_height_cm = float(product["높이(cm)"])
+                fallback_item_unit_weight_kg = float(product["개당중량(kg)"])
+                package_policy = _norm_text(package_spec.get("엔진기본처리정책", "")).upper()
+                mixed_unpack_allowed = (
+                    package_policy == "PACKAGE_AS_IS_FIRST"
+                    and fallback_item_length_cm > 0
+                    and fallback_item_width_cm > 0
+                    and fallback_item_height_cm > 0
+                    and fallback_item_unit_weight_kg > 0
+                )
 
                 if (
                     package_length_cm <= 0
@@ -378,6 +566,11 @@ def build_repack_candidates(
                             source_reason=reason,
                             spec_source="packages_master",
                             candidate_note=_build_candidate_note(reason, "package_unit"),
+                            mixed_unpack_allowed=mixed_unpack_allowed,
+                            fallback_item_length_cm=fallback_item_length_cm,
+                            fallback_item_width_cm=fallback_item_width_cm,
+                            fallback_item_height_cm=fallback_item_height_cm,
+                            fallback_item_unit_weight_kg=fallback_item_unit_weight_kg,
                         )
                     )
 
@@ -570,7 +763,7 @@ def _calc_trim_info(
     outer_size_cm: Tuple[float, float, float],
     orientation: Tuple[float, float, float] | None,
     item_qty: int,
-    keep_height_cm: float = 2.0,
+    keep_height_cm: float = 1.0,
 ) -> dict:
     if not orientation or item_qty <= 0:
         return {
@@ -1220,12 +1413,12 @@ def _resolve_primary_large_box_code(boxes: List[dict], rules: dict) -> str:
 
 def _resolve_trim_keep_height_cm(rules: dict | None) -> float:
     if not isinstance(rules, dict):
-        return 3.0
-    value = rules.get("REPACK_TRIM_KEEP_HEIGHT_CM", 3.0)
+        return 1.0
+    value = rules.get("REPACK_TRIM_KEEP_HEIGHT_CM", 1.0)
     try:
         keep_height = float(value)
     except Exception:
-        keep_height = 3.0
+        keep_height = 1.0
     return max(0.0, keep_height)
 
 
@@ -1263,14 +1456,32 @@ def evaluate_repack_box_candidates(
             orientation = fit_info["best_orientation"]
             trim_info_first_box = fit_info["trim_info_first_box"]
 
+            policy_box_cap = _resolve_box_cap_override(item, box.get("박스코드", ""))
+            if policy_box_cap is not None:
+                recommended_max_units = min(recommended_max_units, policy_box_cap)
+                if recommended_max_units > 0 and orientation is not None:
+                    outer_size_cm = (
+                        float(box.get("외경가로(cm)", box["내경가로(cm)"] + 1.0)),
+                        float(box.get("외경세로(cm)", box["내경세로(cm)"] + 1.0)),
+                        float(box.get("외경높이(cm)", box["내경높이(cm)"] + 1.0)),
+                    )
+                    first_box_qty = min(qty, recommended_max_units)
+                    trim_info_first_box = _calc_trim_info(
+                        inner_size_cm=(
+                            float(box["내경가로(cm)"]),
+                            float(box["내경세로(cm)"]),
+                            float(box["내경높이(cm)"]),
+                        ),
+                        outer_size_cm=outer_size_cm,
+                        orientation=orientation,
+                        item_qty=first_box_qty,
+                        keep_height_cm=_resolve_trim_keep_height_cm(rules),
+                    )
+
             if recommended_max_units <= 0 or orientation is None:
                 continue
 
-            boxes_needed_raw = fit_info.get("boxes_needed")
-            if boxes_needed_raw in (None, ""):
-                continue
-
-            boxes_needed = int(boxes_needed_raw)
+            boxes_needed = int(math.ceil(qty / recommended_max_units))
 
             inner_l = float(box["내경가로(cm)"])
             inner_w = float(box["내경세로(cm)"])
@@ -1314,7 +1525,13 @@ def evaluate_repack_box_candidates(
                     "estimated_fill_ratio_first_box": estimated_fill_ratio_first_box,
                     "source_reason": item["source_reason"],
                     "candidate_note": item.get("candidate_note", ""),
+                    "packing_policy_code": item.get("packing_policy_code", ""),
                     "spec_source": item.get("spec_source", ""),
+                    "mixed_unpack_allowed": bool(item.get("mixed_unpack_allowed", False)),
+                    "fallback_item_length_cm": float(item.get("fallback_item_length_cm", 0) or 0),
+                    "fallback_item_width_cm": float(item.get("fallback_item_width_cm", 0) or 0),
+                    "fallback_item_height_cm": float(item.get("fallback_item_height_cm", 0) or 0),
+                    "fallback_item_unit_weight_kg": float(item.get("fallback_item_unit_weight_kg", 0) or 0),
                     "first_box_trim_info": trim_info_first_box,
                     "global_best_units_by_space": global_best_units_by_space,
                     "global_best_max_units_per_box": global_best_max_units,
@@ -1379,8 +1596,15 @@ def evaluate_repack_box_candidates(
                 "width_cm": float(item.get("width_cm", 0) or 0),
                 "height_cm": float(item.get("height_cm", 0) or 0),
                 "unit_weight_kg": float(item.get("unit_weight_kg", 0) or 0),
+                "packing_policy_code": item.get("packing_policy_code", ""),
                 "is_bulk_case": is_bulk_case,
                 "candidate_note": item.get("candidate_note", ""),
+                "packing_policy_code": item.get("packing_policy_code", ""),
+                "mixed_unpack_allowed": bool(item.get("mixed_unpack_allowed", False)),
+                "fallback_item_length_cm": float(item.get("fallback_item_length_cm", 0) or 0),
+                "fallback_item_width_cm": float(item.get("fallback_item_width_cm", 0) or 0),
+                "fallback_item_height_cm": float(item.get("fallback_item_height_cm", 0) or 0),
+                "fallback_item_unit_weight_kg": float(item.get("fallback_item_unit_weight_kg", 0) or 0),
                 "recommended_box": selected_recommended_box,
                 "all_box_candidates": per_box_results,
             }
@@ -1426,6 +1650,7 @@ def _build_box_line_from_candidate(
         "outer_size_cm": candidate["outer_size_cm"],
         "inner_size_cm": candidate["inner_size_cm"],
         "best_orientation": candidate["best_orientation"],
+        "display_trimmed_height": False,
         "note": str(note or "").strip(),
     }
 
@@ -1509,19 +1734,213 @@ def _calc_min_layer_height_for_qty(layer_variants: List[dict], target_qty: int) 
     return dp[target_qty] / 10.0
 
 
-def _can_fit_single_mixed_repack_box(
+def _try_place_units_on_shelves(
+    units: List[dict],
+    floor_l_cm: float,
+    floor_w_cm: float,
+) -> List[int]:
+    shelves: List[dict] = []
+    placed_indices: List[int] = []
+    used_width_cm = 0.0
+
+    for unit in units:
+        placed = False
+        orientations = []
+        l = float(unit["length_cm"])
+        w = float(unit["width_cm"])
+        orientations.append((l, w))
+        if abs(l - w) > 1e-9:
+            orientations.append((w, l))
+
+        best_existing: tuple[int, float, float] | None = None
+        for shelf_idx, shelf in enumerate(shelves):
+            shelf_height_cm = float(shelf["height_cm"])
+            remaining_l_cm = float(shelf["remaining_l_cm"])
+            for orient_l_cm, orient_w_cm in orientations:
+                if orient_l_cm <= remaining_l_cm + 1e-9 and orient_w_cm <= shelf_height_cm + 1e-9:
+                    waste = remaining_l_cm - orient_l_cm
+                    candidate = (shelf_idx, waste, orient_l_cm, orient_w_cm)
+                    if best_existing is None or candidate[1] < best_existing[1]:
+                        best_existing = candidate
+
+        if best_existing is not None:
+            shelf = shelves[best_existing[0]]
+            shelf["remaining_l_cm"] -= best_existing[2]
+            placed_indices.append(int(unit["idx"]))
+            continue
+
+        best_new: tuple[float, float] | None = None
+        for orient_l_cm, orient_w_cm in orientations:
+            if orient_l_cm <= floor_l_cm + 1e-9 and used_width_cm + orient_w_cm <= floor_w_cm + 1e-9:
+                candidate = (orient_w_cm, orient_l_cm)
+                if best_new is None or candidate[0] < best_new[0]:
+                    best_new = candidate
+
+        if best_new is None:
+            continue
+
+        shelves.append(
+            {
+                "height_cm": best_new[0],
+                "remaining_l_cm": max(0.0, floor_l_cm - best_new[1]),
+            }
+        )
+        used_width_cm += best_new[0]
+        placed_indices.append(int(unit["idx"]))
+
+    return placed_indices
+
+
+def _pack_layer_units(
+    units: List[dict],
+    floor_l_cm: float,
+    floor_w_cm: float,
+) -> List[int]:
+    row_first = _try_place_units_on_shelves(units, floor_l_cm, floor_w_cm)
+
+    swapped_units = [
+        {
+            **unit,
+            "length_cm": float(unit["width_cm"]),
+            "width_cm": float(unit["length_cm"]),
+        }
+        for unit in units
+    ]
+    col_first = _try_place_units_on_shelves(swapped_units, floor_w_cm, floor_l_cm)
+
+    if len(col_first) > len(row_first):
+        return col_first
+    return row_first
+
+
+def _estimate_shared_mixed_height(
+    items: List[dict],
+    candidate_box: dict,
+) -> float | None:
+    floor_l_cm = float(candidate_box["inner_size_cm"][0])
+    floor_w_cm = float(candidate_box["inner_size_cm"][1])
+    inner_h_cm = float(candidate_box["inner_size_cm"][2])
+
+    units: List[dict] = []
+    idx = 0
+    for item in items:
+        qty = int(item.get("qty", 0) or 0)
+        if qty <= 0:
+            continue
+
+        length_cm = float(item.get("length_cm", 0) or 0)
+        width_cm = float(item.get("width_cm", 0) or 0)
+        height_cm = float(item.get("height_cm", 0) or 0)
+        if length_cm <= 0 or width_cm <= 0 or height_cm <= 0:
+            return None
+
+        for _ in range(qty):
+            units.append(
+                {
+                    "idx": idx,
+                    "length_cm": length_cm,
+                    "width_cm": width_cm,
+                    "height_cm": height_cm,
+                    "volume_cm3": length_cm * width_cm * height_cm,
+                }
+            )
+            idx += 1
+
+    if not units:
+        return 0.0
+
+    used_height_cm = 0.0
+    remaining_units = units
+
+    while remaining_units:
+        height_candidates = sorted({round(float(unit["height_cm"]), 3) for unit in remaining_units})
+        best_layer: tuple[float, List[int], float] | None = None
+
+        for layer_height_cm in height_candidates:
+            eligible_units = [
+                unit
+                for unit in remaining_units
+                if float(unit["height_cm"]) <= layer_height_cm + 1e-9
+            ]
+            eligible_units = sorted(
+                eligible_units,
+                key=lambda unit: (
+                    max(float(unit["length_cm"]), float(unit["width_cm"])),
+                    float(unit["length_cm"]) * float(unit["width_cm"]),
+                    float(unit["height_cm"]),
+                ),
+                reverse=True,
+            )
+            placed_indices = _pack_layer_units(eligible_units, floor_l_cm, floor_w_cm)
+            if not placed_indices:
+                continue
+
+            placed_set = set(placed_indices)
+            placed_volume_cm3 = sum(
+                float(unit["volume_cm3"])
+                for unit in eligible_units
+                if int(unit["idx"]) in placed_set
+            )
+            score = placed_volume_cm3 / max(layer_height_cm, 1e-9)
+            candidate = (layer_height_cm, placed_indices, score)
+            if best_layer is None or candidate[2] > best_layer[2]:
+                best_layer = candidate
+
+        if best_layer is None:
+            return None
+
+        used_height_cm += float(best_layer[0])
+        if used_height_cm > inner_h_cm + 1e-9:
+            return used_height_cm
+
+        placed_set = set(best_layer[1])
+        remaining_units = [
+            unit for unit in remaining_units
+            if int(unit["idx"]) not in placed_set
+        ]
+
+    return used_height_cm
+
+
+def _calc_single_mixed_repack_fit(
     items: List[dict],
     candidate_box: dict,
     rules: dict | None,
-) -> bool:
+) -> dict:
     rules = rules or {}
     effective_weight_capacity = float(candidate_box["max_box_weight_kg"]) - float(candidate_box["box_weight_kg"])
     total_item_weight = sum(int(item.get("qty", 0) or 0) * float(item.get("unit_weight_kg", 0) or 0) for item in items)
     if total_item_weight > effective_weight_capacity + 1e-9:
-        return False
+        return {
+            "can_fit": False,
+            "total_item_weight": round(total_item_weight, 3),
+        }
+
+    candidate_box_code = _norm_text(candidate_box.get("box_code", "")).upper()
+    for item in items:
+        box_cap_override = _resolve_box_cap_override(item, candidate_box_code)
+        if box_cap_override is not None and int(item.get("qty", 0) or 0) > box_cap_override:
+            return {
+                "can_fit": False,
+                "total_item_weight": round(total_item_weight, 3),
+            }
 
     layer_tol_cm = float(rules.get("REPACK_MIX_LAYER_TOL_CM", 1.0) or 1.0)
+    keep_height_cm = _resolve_trim_keep_height_cm(rules)
     inner_height_cm = float(candidate_box["inner_size_cm"][2])
+
+    additive_used_height_cm = 0.0
+    tallest_group_height_cm = 0.0
+    box_info = {
+        "내경가로(cm)": candidate_box["inner_size_cm"][0],
+        "내경세로(cm)": candidate_box["inner_size_cm"][1],
+        "내경높이(cm)": candidate_box["inner_size_cm"][2],
+        "외경가로(cm)": candidate_box["outer_size_cm"][0],
+        "외경세로(cm)": candidate_box["outer_size_cm"][1],
+        "외경높이(cm)": candidate_box["outer_size_cm"][2],
+        "박스중량(kg)": candidate_box["box_weight_kg"],
+        "최대허용중량(kg)": candidate_box["max_box_weight_kg"],
+    }
 
     grouped: Dict[Tuple[Any, ...], dict] = {}
     for item in items:
@@ -1549,31 +1968,76 @@ def _can_fit_single_mixed_repack_box(
             }
         grouped[key]["qty"] += qty
 
-    used_height_cm = 0.0
-    box_info = {
-        "내경가로(cm)": candidate_box["inner_size_cm"][0],
-        "내경세로(cm)": candidate_box["inner_size_cm"][1],
-        "내경높이(cm)": candidate_box["inner_size_cm"][2],
-        "외경가로(cm)": candidate_box["outer_size_cm"][0],
-        "외경세로(cm)": candidate_box["outer_size_cm"][1],
-        "외경높이(cm)": candidate_box["outer_size_cm"][2],
-        "박스중량(kg)": candidate_box["box_weight_kg"],
-        "최대허용중량(kg)": candidate_box["max_box_weight_kg"],
-    }
-
     for grouped_item in grouped.values():
         fit_info = _calc_best_orientation_fit(box_info, grouped_item["item"], grouped_item["qty"], rules)
         max_units = int(fit_info.get("max_units_per_box", 0) or 0)
         if max_units <= 0 or int(grouped_item["qty"]) > max_units:
-            return False
+            return {
+                "can_fit": False,
+                "total_item_weight": round(total_item_weight, 3),
+            }
 
         layer_variants = ((fit_info.get("fit_result") or {}).get("layer_variants") or [])
         min_height_cm = _calc_min_layer_height_for_qty(layer_variants, int(grouped_item["qty"]))
         if min_height_cm is None:
-            return False
-        used_height_cm += float(min_height_cm)
+            return {
+                "can_fit": False,
+                "total_item_weight": round(total_item_weight, 3),
+            }
+        additive_used_height_cm += float(min_height_cm)
+        tallest_group_height_cm = max(tallest_group_height_cm, float(min_height_cm))
 
-    return used_height_cm <= (inner_height_cm + layer_tol_cm)
+    used_height_cm = additive_used_height_cm
+    all_item_mix = bool(items) and all(
+        _norm_text(item.get("calc_unit_type", "item")) == "item"
+        for item in items
+    )
+
+    if any(bool(item.get("mixed_unpacked", False)) for item in items):
+        floor_area_cm2 = float(candidate_box["inner_size_cm"][0]) * float(candidate_box["inner_size_cm"][1])
+        total_volume_cm3 = sum(
+            int(item.get("qty", 0) or 0)
+            * float(item.get("length_cm", 0) or 0)
+            * float(item.get("width_cm", 0) or 0)
+            * float(item.get("height_cm", 0) or 0)
+            for item in items
+        )
+        shared_efficiency = float(rules.get("REPACK_MIX_UNPACK_SHARED_EFFICIENCY", 0.70) or 0.70)
+        if floor_area_cm2 > 0 and shared_efficiency > 0:
+            shared_used_height_cm = total_volume_cm3 / (floor_area_cm2 * shared_efficiency)
+            used_height_cm = max(tallest_group_height_cm, shared_used_height_cm)
+    elif all_item_mix:
+        floor_area_cm2 = float(candidate_box["inner_size_cm"][0]) * float(candidate_box["inner_size_cm"][1])
+        total_volume_cm3 = sum(
+            int(item.get("qty", 0) or 0)
+            * float(item.get("length_cm", 0) or 0)
+            * float(item.get("width_cm", 0) or 0)
+            * float(item.get("height_cm", 0) or 0)
+            for item in items
+        )
+        shared_efficiency = float(rules.get("REPACK_MIX_ITEM_SHARED_EFFICIENCY", 0.80) or 0.80)
+        if floor_area_cm2 > 0 and shared_efficiency > 0:
+            shared_used_height_cm = total_volume_cm3 / (floor_area_cm2 * shared_efficiency)
+            used_height_cm = max(tallest_group_height_cm, shared_used_height_cm)
+
+    can_fit = used_height_cm <= (inner_height_cm + layer_tol_cm)
+    remaining_height_cm = max(0.0, inner_height_cm - used_height_cm)
+    trim_cut_height_cm = 0.0
+    if can_fit and remaining_height_cm >= keep_height_cm:
+        trim_cut_height_cm = max(0.0, remaining_height_cm - keep_height_cm)
+
+    trimmed_inner_height_cm = max(0.0, inner_height_cm - trim_cut_height_cm)
+    trimmed_outer_height_cm = max(0.0, float(candidate_box["outer_size_cm"][2]) - trim_cut_height_cm)
+
+    return {
+        "can_fit": can_fit,
+        "total_item_weight": round(total_item_weight, 3),
+        "used_height_cm": _round_cm(used_height_cm),
+        "remaining_height_cm": _round_cm(remaining_height_cm),
+        "trim_cut_height_cm": _round_cm(trim_cut_height_cm),
+        "trimmed_inner_height_cm": _round_cm(trimmed_inner_height_cm),
+        "trimmed_outer_height_cm": _round_cm(trimmed_outer_height_cm),
+    }
 
 
 def _try_allocate_single_mixed_repack_box(
@@ -1584,7 +2048,57 @@ def _try_allocate_single_mixed_repack_box(
     if len(rows) <= 1:
         return []
 
-    item_rows: List[dict] = []
+    def _build_item_rows(use_unpacked_mix: bool = False) -> List[dict]:
+        built_rows: List[dict] = []
+        for row in rows:
+            calc_unit_type = _norm_text(row.get("calc_unit_type", "item"))
+            use_fallback_item = (
+                use_unpacked_mix
+                and calc_unit_type == "package"
+                and bool(row.get("mixed_unpack_allowed", False))
+                and float(row.get("fallback_item_length_cm", 0) or 0) > 0
+                and float(row.get("fallback_item_width_cm", 0) or 0) > 0
+                and float(row.get("fallback_item_height_cm", 0) or 0) > 0
+                and float(row.get("fallback_item_unit_weight_kg", 0) or 0) > 0
+            )
+
+            if use_fallback_item:
+                built_rows.append(
+                    {
+                        "product_name": row["product_name"],
+                        "qty": int(row.get("original_qty", row["qty"])),
+                        "original_qty": int(row.get("original_qty", row["qty"])),
+                        "package_pack_qty": 1,
+                        "calc_unit_type": "item",
+                        "length_cm": float(row.get("fallback_item_length_cm", 0) or 0),
+                        "width_cm": float(row.get("fallback_item_width_cm", 0) or 0),
+                        "height_cm": float(row.get("fallback_item_height_cm", 0) or 0),
+                        "unit_weight_kg": float(row.get("fallback_item_unit_weight_kg", 0) or 0),
+                        "packing_policy_code": row.get("packing_policy_code", ""),
+                        "mixed_unpacked": True,
+                        "note": "패키지 해체 후 혼합 재포장",
+                    }
+                )
+                continue
+
+            built_rows.append(
+                {
+                    "product_name": row["product_name"],
+                    "qty": int(row["qty"]),
+                    "original_qty": int(row.get("original_qty", row["qty"])),
+                    "package_pack_qty": int(row.get("package_pack_qty", 1)),
+                    "calc_unit_type": calc_unit_type,
+                    "length_cm": float(row.get("length_cm", 0) or 0),
+                    "width_cm": float(row.get("width_cm", 0) or 0),
+                    "height_cm": float(row.get("height_cm", 0) or 0),
+                    "unit_weight_kg": float(row.get("unit_weight_kg", 0) or 0),
+                    "packing_policy_code": row.get("packing_policy_code", ""),
+                    "mixed_unpacked": False,
+                    "note": str(row.get("candidate_note", "") or "").strip(),
+                }
+            )
+        return built_rows
+
     common_box_map: Dict[str, dict] | None = None
 
     for row in rows:
@@ -1608,58 +2122,54 @@ def _try_allocate_single_mixed_repack_box(
             if not common_box_map:
                 return []
 
-        item_rows.append(
-            {
-                "product_name": row["product_name"],
-                "qty": int(row["qty"]),
-                "original_qty": int(row.get("original_qty", row["qty"])),
-                "package_pack_qty": int(row.get("package_pack_qty", 1)),
-                "calc_unit_type": _norm_text(row.get("calc_unit_type", "item")),
-                "length_cm": float(row.get("length_cm", 0) or 0),
-                "width_cm": float(row.get("width_cm", 0) or 0),
-                "height_cm": float(row.get("height_cm", 0) or 0),
-                "unit_weight_kg": float(row.get("unit_weight_kg", 0) or 0),
-                "note": str(row.get("candidate_note", "") or "").strip(),
-            }
-        )
-
     ranked_candidates = sorted(
         common_box_map.values(),
         key=lambda candidate: (
             candidate["inner_volume_cm3"],
+            -candidate.get("first_box_trim_info", {}).get("trim_cut_height_cm", 0.0),
             candidate["box_priority"],
         ),
     )
 
-    for candidate_box in ranked_candidates:
-        if not _can_fit_single_mixed_repack_box(item_rows, candidate_box, rules):
-            continue
+    for use_unpacked_mix in (False, True):
+        item_rows = _build_item_rows(use_unpacked_mix=use_unpacked_mix)
 
-        total_qty = 0
-        total_weight = float(candidate_box["box_weight_kg"])
-        for item in item_rows:
-            calc_unit_type = _norm_text(item.get("calc_unit_type", "item"))
-            package_pack_qty = int(item.get("package_pack_qty", 1) or 1)
-            qty = int(item.get("qty", 0) or 0)
-            total_weight += qty * float(item.get("unit_weight_kg", 0) or 0)
-            if calc_unit_type == "package":
-                total_qty += qty * package_pack_qty
-            else:
-                total_qty += qty
+        for candidate_box in ranked_candidates:
+            fit_summary = _calc_single_mixed_repack_fit(item_rows, candidate_box, rules)
+            if not fit_summary.get("can_fit", False):
+                continue
 
-        return [
-            {
-                "box_no": 1,
-                "box_code": candidate_box["box_code"],
-                "box_name": candidate_box["box_name"],
-                "outer_size_cm": candidate_box["outer_size_cm"],
-                "inner_size_cm": candidate_box["inner_size_cm"],
-                "gross_weight_est": round(total_weight, 3),
-                "each_qty": total_qty,
-                "note": "혼합 재포장",
-                "items": item_rows,
-            }
-        ]
+            total_qty = 0
+            total_weight = float(candidate_box["box_weight_kg"])
+            for item in item_rows:
+                calc_unit_type = _norm_text(item.get("calc_unit_type", "item"))
+                package_pack_qty = int(item.get("package_pack_qty", 1) or 1)
+                qty = int(item.get("qty", 0) or 0)
+                total_weight += qty * float(item.get("unit_weight_kg", 0) or 0)
+                if calc_unit_type == "package":
+                    total_qty += qty * package_pack_qty
+                else:
+                    total_qty += qty
+
+            return [
+                {
+                    "box_no": 1,
+                    "box_code": candidate_box["box_code"],
+                    "box_name": candidate_box["box_name"],
+                    "outer_size_cm": candidate_box["outer_size_cm"],
+                    "inner_size_cm": candidate_box["inner_size_cm"],
+                    "gross_weight_est": round(total_weight, 3),
+                    "each_qty": total_qty,
+                    "used_height_cm": fit_summary.get("used_height_cm"),
+                    "remaining_height_cm": fit_summary.get("remaining_height_cm"),
+                    "trim_cut_height_cm": fit_summary.get("trim_cut_height_cm"),
+                    "trimmed_inner_height_cm": fit_summary.get("trimmed_inner_height_cm"),
+                    "trimmed_outer_height_cm": fit_summary.get("trimmed_outer_height_cm"),
+                    "display_trimmed_height": True,
+                    "note": "혼합 재포장",
+                    "items": item_rows,
+                }
+            ]
 
     return []
 
@@ -1718,6 +2228,19 @@ def build_repack_final_plan(
                 )
                 remaining_qty -= primary_cap
                 box_no += 1
+
+        if is_bulk_case and primary_cap > 0 and remaining_qty > 0 and not box_lines:
+            box_lines.append(
+                _build_box_line_from_candidate(
+                    primary_candidate,
+                    remaining_qty,
+                    box_no,
+                    keep_height_cm,
+                    candidate_note,
+                )
+            )
+            remaining_qty = 0
+            box_no += 1
 
         if remaining_qty > 0:
             remainder_candidate = _select_repack_candidate_for_qty(

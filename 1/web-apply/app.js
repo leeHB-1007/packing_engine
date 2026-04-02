@@ -118,7 +118,7 @@ function formatWeight(value) {
     return String(value);
   }
 
-  return num.toFixed(3).replace(/\.?0+$/, "");
+  return num.toFixed(1).replace(/\.?0+$/, "");
 }
 
 function formatMaybeNumber(value) {

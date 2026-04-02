@@ -347,7 +347,7 @@ def build_table_totals(groups: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "box_count": total_box_count,
         "each_qty": total_each_qty,
-        "total_weight_kg": round(total_weight, 3),
+        "total_weight_kg": round(total_weight, 1),
     }
 
 

@@ -133,7 +133,13 @@ def _parse_dims(value: Any) -> Optional[Tuple[float, float, float]]:
     return None
 
 
-def _build_cut_box_display(box_label: str, outer_dims: Any, cut_height: Any, trimmed_outer_height: Any) -> str:
+def _build_cut_box_display(
+    box_label: str,
+    outer_dims: Any,
+    cut_height: Any,
+    trimmed_outer_height: Any,
+    display_trimmed_height: bool = True,
+) -> str:
     """
     규칙:
     - 제단 박스면 치수만 출력
@@ -149,7 +155,9 @@ def _build_cut_box_display(box_label: str, outer_dims: Any, cut_height: Any, tri
 
     is_cut = False
 
-    if cut_height_f is not None and cut_height_f > 0:
+    if not display_trimmed_height:
+        is_cut = False
+    elif cut_height_f is not None and cut_height_f > 0:
         is_cut = True
     elif dims and trimmed_outer_height_f is not None:
         if trimmed_outer_height_f < float(dims[2]):
@@ -174,6 +182,12 @@ def _build_cut_box_display(box_label: str, outer_dims: Any, cut_height: Any, tri
 def _collect_rows(result: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
 
+    fullbox_display_rows = result.get("fullbox_display_rows") or []
+    if isinstance(fullbox_display_rows, list):
+        for row in fullbox_display_rows:
+            if isinstance(row, dict):
+                rows.append(row)
+
     mixed_repack_boxes = result.get("mixed_repack_boxes") or []
     if isinstance(mixed_repack_boxes, list):
         for mixed_box in mixed_repack_boxes:
@@ -194,7 +208,7 @@ def _collect_rows(result: Dict[str, Any]) -> List[Dict[str, Any]]:
             else:
                 box_label = "박스정보없음"
 
-            for item in mixed_box.get("items", []) or []:
+            for item_idx, item in enumerate(mixed_box.get("items", []) or [], start=1):
                 if not isinstance(item, dict):
                     continue
 
@@ -203,7 +217,7 @@ def _collect_rows(result: Dict[str, Any]) -> List[Dict[str, Any]]:
                         "product_name": str(item.get("product_name", "상품명없음")),
                         "box_label": box_label,
                         "box_no": mixed_box.get("box_no", 1),
-                        "box_count": 1,
+                        "box_count": 1 if item_idx == 1 else 0,
                         "input_qty": item.get("original_qty", item.get("qty")),
                         "calc_qty": item.get("qty"),
                         "calc_unit": _unit_label(item.get("calc_unit_type", "ea")),
@@ -211,11 +225,12 @@ def _collect_rows(result: Dict[str, Any]) -> List[Dict[str, Any]]:
                         "estimated_weight": mixed_box.get("gross_weight_est"),
                         "per_layer": None,
                         "layers": None,
-                        "used_height": None,
-                        "remaining_height": None,
-                        "cut_height": None,
-                        "post_cut_outer_height": None,
-                        "post_cut_inner_height": None,
+                        "used_height": mixed_box.get("used_height_cm"),
+                        "remaining_height": mixed_box.get("remaining_height_cm"),
+                        "cut_height": mixed_box.get("trim_cut_height_cm"),
+                        "post_cut_outer_height": mixed_box.get("trimmed_outer_height_cm"),
+                        "post_cut_inner_height": mixed_box.get("trimmed_inner_height_cm"),
+                        "display_trimmed_height": mixed_box.get("display_trimmed_height", False),
                         "note": mixed_box.get("note", ""),
                         "max_capacity": None,
                         "recommended_capacity": None,
@@ -301,6 +316,7 @@ def _collect_rows(result: Dict[str, Any]) -> List[Dict[str, Any]]:
                         "cut_height": box.get("trim_cut_height_cm"),
                         "post_cut_outer_height": box.get("trimmed_outer_height_cm"),
                         "post_cut_inner_height": box.get("trimmed_inner_height_cm"),
+                        "display_trimmed_height": box.get("display_trimmed_height", False),
                         "note": box.get("note", plan.get("note", "")),
                         "max_capacity": max_capacity,
                         "recommended_capacity": recommended_capacity,
@@ -371,6 +387,7 @@ def _format_final_only(rows: List[Dict[str, Any]]) -> List[str]:
                 outer_dims=row.get("outer_dims"),
                 cut_height=row.get("cut_height"),
                 trimmed_outer_height=row.get("post_cut_outer_height"),
+                display_trimmed_height=bool(row.get("display_trimmed_height", False)),
             )
         )
 
