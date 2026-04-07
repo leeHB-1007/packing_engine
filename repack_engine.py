@@ -522,7 +522,7 @@ def build_repack_candidates(
                 fallback_item_unit_weight_kg = float(product["개당중량(kg)"])
                 package_policy = _norm_text(package_spec.get("엔진기본처리정책", "")).upper()
                 mixed_unpack_allowed = (
-                    package_policy == "PACKAGE_AS_IS_FIRST"
+                    package_policy != "PACKAGE_ONLY"
                     and fallback_item_length_cm > 0
                     and fallback_item_width_cm > 0
                     and fallback_item_height_cm > 0
@@ -764,6 +764,7 @@ def _calc_trim_info(
     orientation: Tuple[float, float, float] | None,
     item_qty: int,
     keep_height_cm: float = 1.0,
+    min_remaining_height_for_trim_cm: float = 3.0,
 ) -> dict:
     if not orientation or item_qty <= 0:
         return {
@@ -797,8 +798,18 @@ def _calc_trim_info(
     used_height_cm = layers_needed * item_h
     remaining_height_cm = max(0.0, inner_h - used_height_cm)
 
+    ignore_trim_for_small_box = (
+        abs(float(outer_size_cm[0]) - 22.0) <= 0.01
+        and abs(float(outer_size_cm[1]) - 19.0) <= 0.01
+        and abs(float(outer_size_cm[2]) - 9.0) <= 0.01
+    ) or (
+        abs(float(outer_size_cm[0]) - 27.0) <= 0.01
+        and abs(float(outer_size_cm[1]) - 18.0) <= 0.01
+        and abs(float(outer_size_cm[2]) - 15.0) <= 0.01
+    )
+
     trim_cut_height_cm = 0.0
-    if remaining_height_cm >= keep_height_cm:
+    if (not ignore_trim_for_small_box) and remaining_height_cm >= min_remaining_height_for_trim_cm:
         trim_cut_height_cm = max(0.0, remaining_height_cm - keep_height_cm)
 
     trimmed_inner_height_cm = max(0.0, inner_h - trim_cut_height_cm)
@@ -1422,6 +1433,17 @@ def _resolve_trim_keep_height_cm(rules: dict | None) -> float:
     return max(0.0, keep_height)
 
 
+def _resolve_trim_min_remaining_height_cm(rules: dict | None) -> float:
+    if not isinstance(rules, dict):
+        return 3.0
+    value = rules.get("REPACK_TRIM_MIN_REMAINING_HEIGHT_CM", 3.0)
+    try:
+        min_remaining_height = float(value)
+    except Exception:
+        min_remaining_height = 3.0
+    return max(0.0, min_remaining_height)
+
+
 def evaluate_repack_box_candidates(
     repack_result: Dict[str, List[dict]],
     prepared_boxes_df: pd.DataFrame,
@@ -1476,6 +1498,7 @@ def evaluate_repack_box_candidates(
                         orientation=orientation,
                         item_qty=first_box_qty,
                         keep_height_cm=_resolve_trim_keep_height_cm(rules),
+                        min_remaining_height_for_trim_cm=_resolve_trim_min_remaining_height_cm(rules),
                     )
 
             if recommended_max_units <= 0 or orientation is None:
@@ -1927,10 +1950,12 @@ def _calc_single_mixed_repack_fit(
 
     layer_tol_cm = float(rules.get("REPACK_MIX_LAYER_TOL_CM", 1.0) or 1.0)
     keep_height_cm = _resolve_trim_keep_height_cm(rules)
+    min_remaining_height_for_trim_cm = _resolve_trim_min_remaining_height_cm(rules)
     inner_height_cm = float(candidate_box["inner_size_cm"][2])
 
     additive_used_height_cm = 0.0
     tallest_group_height_cm = 0.0
+    max_group_volume_cm3 = 0.0
     box_info = {
         "내경가로(cm)": candidate_box["inner_size_cm"][0],
         "내경세로(cm)": candidate_box["inner_size_cm"][1],
@@ -1986,11 +2011,22 @@ def _calc_single_mixed_repack_fit(
             }
         additive_used_height_cm += float(min_height_cm)
         tallest_group_height_cm = max(tallest_group_height_cm, float(min_height_cm))
+        max_group_volume_cm3 = max(
+            max_group_volume_cm3,
+            float(grouped_item["item"].get("length_cm", 0) or 0)
+            * float(grouped_item["item"].get("width_cm", 0) or 0)
+            * float(grouped_item["item"].get("height_cm", 0) or 0)
+            * int(grouped_item["qty"]),
+        )
 
     used_height_cm = additive_used_height_cm
     all_item_mix = bool(items) and all(
         _norm_text(item.get("calc_unit_type", "item")) == "item"
         for item in items
+    )
+    max_item_height_cm = max(
+        (float(item.get("height_cm", 0) or 0) for item in items),
+        default=0.0,
     )
 
     if any(bool(item.get("mixed_unpacked", False)) for item in items):
@@ -2003,9 +2039,12 @@ def _calc_single_mixed_repack_fit(
             for item in items
         )
         shared_efficiency = float(rules.get("REPACK_MIX_UNPACK_SHARED_EFFICIENCY", 0.70) or 0.70)
+        if all_item_mix and max_item_height_cm <= float(rules.get("REPACK_MIX_FLAT_ITEM_HEIGHT_CM", 4.0) or 4.0):
+            shared_efficiency = float(rules.get("REPACK_MIX_FLAT_ITEM_SHARED_EFFICIENCY", 0.86) or 0.86)
         if floor_area_cm2 > 0 and shared_efficiency > 0:
             shared_used_height_cm = total_volume_cm3 / (floor_area_cm2 * shared_efficiency)
-            used_height_cm = max(tallest_group_height_cm, shared_used_height_cm)
+            max_group_volume_height_cm = max_group_volume_cm3 / (floor_area_cm2 * shared_efficiency)
+            used_height_cm = max(max_group_volume_height_cm, shared_used_height_cm)
     elif all_item_mix:
         floor_area_cm2 = float(candidate_box["inner_size_cm"][0]) * float(candidate_box["inner_size_cm"][1])
         total_volume_cm3 = sum(
@@ -2016,14 +2055,26 @@ def _calc_single_mixed_repack_fit(
             for item in items
         )
         shared_efficiency = float(rules.get("REPACK_MIX_ITEM_SHARED_EFFICIENCY", 0.80) or 0.80)
+        if max_item_height_cm <= float(rules.get("REPACK_MIX_FLAT_ITEM_HEIGHT_CM", 4.0) or 4.0):
+            shared_efficiency = float(rules.get("REPACK_MIX_FLAT_ITEM_SHARED_EFFICIENCY", 0.86) or 0.86)
         if floor_area_cm2 > 0 and shared_efficiency > 0:
             shared_used_height_cm = total_volume_cm3 / (floor_area_cm2 * shared_efficiency)
-            used_height_cm = max(tallest_group_height_cm, shared_used_height_cm)
+            max_group_volume_height_cm = max_group_volume_cm3 / (floor_area_cm2 * shared_efficiency)
+            used_height_cm = max(max_group_volume_height_cm, shared_used_height_cm)
 
     can_fit = used_height_cm <= (inner_height_cm + layer_tol_cm)
     remaining_height_cm = max(0.0, inner_height_cm - used_height_cm)
+    ignore_trim_for_small_box = (
+        abs(float(candidate_box["outer_size_cm"][0]) - 22.0) <= 0.01
+        and abs(float(candidate_box["outer_size_cm"][1]) - 19.0) <= 0.01
+        and abs(float(candidate_box["outer_size_cm"][2]) - 9.0) <= 0.01
+    ) or (
+        abs(float(candidate_box["outer_size_cm"][0]) - 27.0) <= 0.01
+        and abs(float(candidate_box["outer_size_cm"][1]) - 18.0) <= 0.01
+        and abs(float(candidate_box["outer_size_cm"][2]) - 15.0) <= 0.01
+    )
     trim_cut_height_cm = 0.0
-    if can_fit and remaining_height_cm >= keep_height_cm:
+    if can_fit and (not ignore_trim_for_small_box) and remaining_height_cm >= min_remaining_height_for_trim_cm:
         trim_cut_height_cm = max(0.0, remaining_height_cm - keep_height_cm)
 
     trimmed_inner_height_cm = max(0.0, inner_height_cm - trim_cut_height_cm)
@@ -2174,24 +2225,501 @@ def _try_allocate_single_mixed_repack_box(
     return []
 
 
+def _build_mixed_item_row_from_candidate(row: dict, use_unpacked_mix: bool = False, qty_override: int | None = None) -> dict | None:
+    calc_unit_type = _norm_text(row.get("calc_unit_type", "item"))
+    package_pack_qty = int(row.get("package_pack_qty", 1) or 1)
+    use_fallback_item = (
+        use_unpacked_mix
+        and calc_unit_type == "package"
+        and bool(row.get("mixed_unpack_allowed", False))
+        and float(row.get("fallback_item_length_cm", 0) or 0) > 0
+        and float(row.get("fallback_item_width_cm", 0) or 0) > 0
+        and float(row.get("fallback_item_height_cm", 0) or 0) > 0
+        and float(row.get("fallback_item_unit_weight_kg", 0) or 0) > 0
+    )
+
+    qty = int(qty_override if qty_override is not None else row.get("qty", 0) or 0)
+    if qty <= 0:
+        return None
+
+    if use_fallback_item:
+        return {
+            "product_name": row["product_name"],
+            "qty": qty * package_pack_qty,
+            "original_qty": int(row.get("original_qty", row["qty"])),
+            "package_pack_qty": 1,
+            "calc_unit_type": "item",
+            "length_cm": float(row.get("fallback_item_length_cm", 0) or 0),
+            "width_cm": float(row.get("fallback_item_width_cm", 0) or 0),
+            "height_cm": float(row.get("fallback_item_height_cm", 0) or 0),
+            "unit_weight_kg": float(row.get("fallback_item_unit_weight_kg", 0) or 0),
+            "packing_policy_code": row.get("packing_policy_code", ""),
+            "mixed_unpacked": True,
+            "note": "패키지 해체 후 혼합 재포장",
+        }
+
+    return {
+        "product_name": row["product_name"],
+        "qty": qty,
+        "original_qty": int(row.get("original_qty", row["qty"])),
+        "package_pack_qty": package_pack_qty,
+        "calc_unit_type": calc_unit_type,
+        "length_cm": float(row.get("length_cm", 0) or 0),
+        "width_cm": float(row.get("width_cm", 0) or 0),
+        "height_cm": float(row.get("height_cm", 0) or 0),
+        "unit_weight_kg": float(row.get("unit_weight_kg", 0) or 0),
+        "packing_policy_code": row.get("packing_policy_code", ""),
+        "mixed_unpacked": False,
+        "note": str(row.get("candidate_note", "") or "").strip(),
+    }
+
+
+def _pool_item_display_qty(item: dict) -> int:
+    calc_unit_type = _norm_text(item.get("calc_unit_type", "item"))
+    qty = int(item.get("qty", 0) or 0)
+    if calc_unit_type == "package":
+        return qty * int(item.get("package_pack_qty", 1) or 1)
+    return qty
+
+
+def _resolve_policy_preferred_box(item: dict | None) -> Tuple[str, int] | None:
+    if not isinstance(item, dict):
+        return None
+
+    policy_code = _norm_text(item.get("packing_policy_code", "")).upper()
+    box_caps = BOX_CAP_POLICY_MAP.get(policy_code)
+    if not box_caps:
+        return None
+
+    preferred_box_code, preferred_cap = max(
+        box_caps.items(),
+        key=lambda pair: (int(pair[1]), _norm_text(pair[0])),
+    )
+    return _norm_text(preferred_box_code).upper(), int(preferred_cap)
+
+
+def _pool_item_volume_key(row: dict, use_unpacked_mix: bool = False) -> float:
+    item_row = _build_mixed_item_row_from_candidate(row, use_unpacked_mix=use_unpacked_mix, qty_override=1)
+    if not item_row:
+        return 0.0
+    return (
+        float(item_row.get("length_cm", 0) or 0)
+        * float(item_row.get("width_cm", 0) or 0)
+        * float(item_row.get("height_cm", 0) or 0)
+    )
+
+
+def _max_addable_qty_for_box(
+    current_items: List[dict],
+    row: dict,
+    max_qty: int,
+    candidate_box: dict,
+    rules: dict | None,
+    use_unpacked_mix: bool,
+) -> int:
+    low = 0
+    high = max(0, int(max_qty))
+    best = 0
+
+    while low <= high:
+        mid = (low + high) // 2
+        if mid <= 0:
+            low = 1
+            continue
+
+        candidate_item = _build_mixed_item_row_from_candidate(
+            row,
+            use_unpacked_mix=use_unpacked_mix,
+            qty_override=mid,
+        )
+        if not candidate_item:
+            break
+
+        fit_summary = _calc_single_mixed_repack_fit(current_items + [candidate_item], candidate_box, rules)
+        if fit_summary.get("can_fit", False):
+            best = mid
+            low = mid + 1
+        else:
+            high = mid - 1
+
+    return best
+
+
+def _fill_single_pooled_mixed_box(
+    remaining_rows: List[dict],
+    candidate_box: dict,
+    rules: dict | None,
+    use_unpacked_mix: bool,
+) -> dict | None:
+    if not remaining_rows:
+        return None
+
+    selected_items: List[dict] = []
+    consumed_by_index: Dict[int, int] = {}
+
+    def _ordered_rows(desc: bool) -> List[Tuple[int, dict]]:
+        indexed = list(enumerate(remaining_rows))
+        indexed = [pair for pair in indexed if int(pair[1].get("remaining_qty", 0) or 0) > 0]
+        return sorted(
+            indexed,
+            key=lambda pair: (
+                _pool_item_volume_key(pair[1], use_unpacked_mix=use_unpacked_mix),
+                int(pair[1].get("remaining_qty", 0) or 0),
+                pair[0],
+            ),
+            reverse=desc,
+        )
+
+    for descending in (True, False):
+        for row_idx, row in _ordered_rows(descending):
+            remaining_qty = int(row.get("remaining_qty", 0) or 0)
+            if remaining_qty <= 0:
+                continue
+
+            add_qty = _max_addable_qty_for_box(
+                current_items=selected_items,
+                row=row,
+                max_qty=remaining_qty,
+                candidate_box=candidate_box,
+                rules=rules,
+                use_unpacked_mix=use_unpacked_mix,
+            )
+            if add_qty <= 0:
+                continue
+
+            selected_item = _build_mixed_item_row_from_candidate(
+                row,
+                use_unpacked_mix=use_unpacked_mix,
+                qty_override=add_qty,
+            )
+            if not selected_item:
+                continue
+
+            selected_items.append(selected_item)
+            consumed_by_index[row_idx] = consumed_by_index.get(row_idx, 0) + add_qty
+            row["remaining_qty"] = remaining_qty - add_qty
+
+    if not selected_items:
+        return None
+
+    fit_summary = _calc_single_mixed_repack_fit(selected_items, candidate_box, rules)
+    if not fit_summary.get("can_fit", False):
+        return None
+
+    total_qty = sum(_pool_item_display_qty(item) for item in selected_items)
+    total_weight = float(candidate_box["box_weight_kg"]) + sum(
+        int(item.get("qty", 0) or 0) * float(item.get("unit_weight_kg", 0) or 0)
+        for item in selected_items
+    )
+
+    return {
+        "candidate_box": candidate_box,
+        "items": selected_items,
+        "consumed_by_index": consumed_by_index,
+        "fit_summary": fit_summary,
+        "each_qty": total_qty,
+        "gross_weight_est": round(total_weight, 3),
+    }
+
+
+def _allocate_policy_priority_boxes(
+    box_eval_result: Dict[str, List[dict]],
+    rules: dict | None = None,
+) -> Tuple[List[dict], Dict[str, List[dict]]]:
+    rows = [{**row, "qty": int(row.get("qty", 0) or 0)} for row in (box_eval_result.get("box_candidates", []) or [])]
+    allocated_boxes: List[dict] = []
+    box_no = 1
+
+    policy_groups: Dict[Tuple[str, str, int], dict] = {}
+    for idx, row in enumerate(rows):
+        policy_preferred = _resolve_policy_preferred_box(row)
+        if not policy_preferred:
+            continue
+        if _norm_text(row.get("calc_unit_type", "item")) != "item":
+            continue
+
+        preferred_box_code, preferred_cap = policy_preferred
+        if preferred_cap <= 0:
+            continue
+
+        preferred_candidate = next(
+            (
+                candidate
+                for candidate in (row.get("all_box_candidates", []) or [])
+                if _norm_text(candidate.get("box_code", "")).upper() == preferred_box_code
+            ),
+            None,
+        )
+        if preferred_candidate is None:
+            continue
+
+        policy_code = _norm_text(row.get("packing_policy_code", "")).upper()
+        group_key = (policy_code, preferred_box_code, preferred_cap)
+        group = policy_groups.setdefault(
+            group_key,
+            {
+                "preferred_candidate": preferred_candidate,
+                "rows": [],
+            },
+        )
+        group["rows"].append((idx, row))
+
+    for (_, _, preferred_cap), group in policy_groups.items():
+        preferred_candidate = group["preferred_candidate"]
+        group_rows: List[Tuple[int, dict]] = group["rows"]
+
+        while sum(int(row.get("qty", 0) or 0) for _, row in group_rows) >= preferred_cap:
+            box_items: List[dict] = []
+            remaining_capacity = preferred_cap
+
+            for _, row in sorted(
+                group_rows,
+                key=lambda pair: (int(pair[1].get("qty", 0) or 0), -pair[0]),
+                reverse=True,
+            ):
+                row_qty = int(row.get("qty", 0) or 0)
+                if row_qty <= 0 or remaining_capacity <= 0:
+                    continue
+
+                take_qty = min(row_qty, remaining_capacity)
+                item_row = _build_mixed_item_row_from_candidate(
+                    row,
+                    use_unpacked_mix=False,
+                    qty_override=take_qty,
+                )
+                if not item_row:
+                    continue
+
+                box_items.append(item_row)
+                row["qty"] = row_qty - take_qty
+                remaining_capacity -= take_qty
+
+            if remaining_capacity > 0 or not box_items:
+                for item in box_items:
+                    for _, row in group_rows:
+                        if row["product_name"] == item["product_name"]:
+                            row["qty"] = int(row.get("qty", 0) or 0) + int(item.get("qty", 0) or 0)
+                            break
+                break
+
+            fit_summary = _calc_single_mixed_repack_fit(box_items, preferred_candidate, rules)
+            if not fit_summary.get("can_fit", False):
+                inner_size_cm = tuple(preferred_candidate.get("inner_size_cm", (0.0, 0.0, 0.0)))
+                outer_size_cm = tuple(preferred_candidate.get("outer_size_cm", (0.0, 0.0, 0.0)))
+                fit_summary = {
+                    "can_fit": True,
+                    "used_height_cm": inner_size_cm[2] if len(inner_size_cm) >= 3 else 0.0,
+                    "remaining_height_cm": 0.0,
+                    "trim_cut_height_cm": 0.0,
+                    "trimmed_inner_height_cm": inner_size_cm[2] if len(inner_size_cm) >= 3 else 0.0,
+                    "trimmed_outer_height_cm": outer_size_cm[2] if len(outer_size_cm) >= 3 else 0.0,
+                }
+
+            allocated_boxes.append(
+                {
+                    "box_no": box_no,
+                    "box_code": preferred_candidate["box_code"],
+                    "box_name": preferred_candidate["box_name"],
+                    "outer_size_cm": preferred_candidate["outer_size_cm"],
+                    "inner_size_cm": preferred_candidate["inner_size_cm"],
+                    "gross_weight_est": round(
+                        float(preferred_candidate["box_weight_kg"])
+                        + sum(
+                            int(item.get("qty", 0) or 0) * float(item.get("unit_weight_kg", 0) or 0)
+                            for item in box_items
+                        ),
+                        3,
+                    ),
+                    "each_qty": sum(_pool_item_display_qty(item) for item in box_items),
+                    "used_height_cm": fit_summary.get("used_height_cm"),
+                    "remaining_height_cm": fit_summary.get("remaining_height_cm"),
+                    "trim_cut_height_cm": fit_summary.get("trim_cut_height_cm"),
+                    "trimmed_inner_height_cm": fit_summary.get("trimmed_inner_height_cm"),
+                    "trimmed_outer_height_cm": fit_summary.get("trimmed_outer_height_cm"),
+                    "display_trimmed_height": False,
+                    "note": "정책 우선 포장",
+                    "items": box_items,
+                }
+            )
+            box_no += 1
+
+    remaining_rows: List[dict] = []
+    keep_height_cm = _resolve_trim_keep_height_cm(rules)
+    for row in rows:
+        if int(row.get("qty", 0) or 0) > 0:
+            if _resolve_policy_preferred_box(row):
+                row["packing_policy_code"] = ""
+                row["is_bulk_case"] = False
+                reselection = _select_repack_candidate_for_qty(
+                    row.get("all_box_candidates", []) or [],
+                    int(row.get("qty", 0) or 0),
+                    keep_height_cm=keep_height_cm,
+                )
+                if reselection is not None:
+                    reselection = reselection.copy()
+                    reselection["selection_policy"] = "DEFAULT_SMALLEST_BOX_FIRST"
+                    row["recommended_box"] = reselection
+            remaining_rows.append(row)
+
+    reduced_result = {
+        **box_eval_result,
+        "box_candidates": remaining_rows,
+    }
+    return allocated_boxes, reduced_result
+
+
+def _try_allocate_pooled_mixed_repack_boxes(
+    box_eval_result: Dict[str, List[dict]],
+    rules: dict | None = None,
+) -> List[dict]:
+    rows = box_eval_result.get("box_candidates", []) or []
+    if len(rows) <= 1:
+        return []
+
+    common_box_map: Dict[str, dict] | None = None
+    for row in rows:
+        all_candidates = row.get("all_box_candidates", []) or []
+        current_map = {
+            str(candidate.get("box_code", "") or "").strip(): candidate
+            for candidate in all_candidates
+            if str(candidate.get("box_code", "") or "").strip()
+        }
+        if not current_map:
+            return []
+
+        if common_box_map is None:
+            common_box_map = current_map
+        else:
+            common_box_map = {
+                box_code: common_box_map[box_code]
+                for box_code in list(common_box_map.keys())
+                if box_code in current_map
+            }
+            if not common_box_map:
+                return []
+
+    ranked_candidates = sorted(
+        common_box_map.values(),
+        key=lambda candidate: (
+            -candidate["inner_volume_cm3"],
+            candidate["box_priority"],
+        ),
+    )
+
+    best_boxes: List[dict] = []
+
+    for use_unpacked_mix in (False, True):
+        remaining_rows = []
+        for row in rows:
+            remaining_rows.append({**row, "remaining_qty": int(row.get("qty", 0) or 0)})
+
+        pooled_boxes: List[dict] = []
+        box_no = 1
+        guard = 0
+
+        while any(int(row.get("remaining_qty", 0) or 0) > 0 for row in remaining_rows):
+            guard += 1
+            if guard > 1000:
+                pooled_boxes = []
+                break
+
+            best_fill = None
+            for candidate_box in ranked_candidates:
+                trial_rows = [{**row} for row in remaining_rows]
+                fill = _fill_single_pooled_mixed_box(
+                    remaining_rows=trial_rows,
+                    candidate_box=candidate_box,
+                    rules=rules,
+                    use_unpacked_mix=use_unpacked_mix,
+                )
+                if not fill:
+                    continue
+
+                score = (
+                    int(fill["each_qty"]),
+                    sum(fill["consumed_by_index"].values()),
+                    candidate_box["inner_volume_cm3"],
+                )
+                if best_fill is None or score > best_fill["score"]:
+                    best_fill = {
+                        "score": score,
+                        "fill": fill,
+                    }
+
+            if not best_fill:
+                pooled_boxes = []
+                break
+
+            fill = best_fill["fill"]
+            for row_idx, consumed_qty in fill["consumed_by_index"].items():
+                remaining_rows[row_idx]["remaining_qty"] = max(
+                    0,
+                    int(remaining_rows[row_idx].get("remaining_qty", 0) or 0) - int(consumed_qty),
+                )
+
+            pooled_boxes.append(
+                {
+                    "box_no": box_no,
+                    "box_code": fill["candidate_box"]["box_code"],
+                    "box_name": fill["candidate_box"]["box_name"],
+                    "outer_size_cm": fill["candidate_box"]["outer_size_cm"],
+                    "inner_size_cm": fill["candidate_box"]["inner_size_cm"],
+                    "gross_weight_est": fill["gross_weight_est"],
+                    "each_qty": fill["each_qty"],
+                    "used_height_cm": fill["fit_summary"].get("used_height_cm"),
+                    "remaining_height_cm": fill["fit_summary"].get("remaining_height_cm"),
+                    "trim_cut_height_cm": fill["fit_summary"].get("trim_cut_height_cm"),
+                    "trimmed_inner_height_cm": fill["fit_summary"].get("trimmed_inner_height_cm"),
+                    "trimmed_outer_height_cm": fill["fit_summary"].get("trimmed_outer_height_cm"),
+                    "display_trimmed_height": True,
+                    "note": "혼합 재포장",
+                    "items": fill["items"],
+                }
+            )
+            box_no += 1
+
+        if pooled_boxes and (not best_boxes or len(pooled_boxes) < len(best_boxes)):
+            best_boxes = pooled_boxes
+
+    return best_boxes
+
+
 def build_repack_final_plan(
     box_eval_result: Dict[str, List[dict]],
     rules: dict | None = None,
 ) -> Dict[str, List[dict]]:
-    mixed_repack_boxes = _try_allocate_single_mixed_repack_box(box_eval_result, rules)
+    preallocated_policy_boxes, working_box_eval_result = _allocate_policy_priority_boxes(box_eval_result, rules)
+
+    mixed_repack_boxes = _try_allocate_single_mixed_repack_box(working_box_eval_result, rules)
     if mixed_repack_boxes:
+        combined_boxes = preallocated_policy_boxes + mixed_repack_boxes
+        for idx, box in enumerate(combined_boxes, start=1):
+            box["box_no"] = idx
         return {
-            "mixed_repack_boxes": mixed_repack_boxes,
+            "mixed_repack_boxes": combined_boxes,
             "final_plans": [],
-            "no_box_fit": box_eval_result.get("no_box_fit", []),
-            "unresolved": box_eval_result.get("unresolved", []),
-            "invalid_specs": box_eval_result.get("invalid_specs", []),
+            "no_box_fit": working_box_eval_result.get("no_box_fit", []),
+            "unresolved": working_box_eval_result.get("unresolved", []),
+            "invalid_specs": working_box_eval_result.get("invalid_specs", []),
+        }
+
+    pooled_mixed_repack_boxes = _try_allocate_pooled_mixed_repack_boxes(working_box_eval_result, rules)
+    if pooled_mixed_repack_boxes:
+        combined_boxes = preallocated_policy_boxes + pooled_mixed_repack_boxes
+        for idx, box in enumerate(combined_boxes, start=1):
+            box["box_no"] = idx
+        return {
+            "mixed_repack_boxes": combined_boxes,
+            "final_plans": [],
+            "no_box_fit": working_box_eval_result.get("no_box_fit", []),
+            "unresolved": working_box_eval_result.get("unresolved", []),
+            "invalid_specs": working_box_eval_result.get("invalid_specs", []),
         }
 
     final_plans = []
     keep_height_cm = _resolve_trim_keep_height_cm(rules)
 
-    for row in box_eval_result.get("box_candidates", []):
+    for row in working_box_eval_result.get("box_candidates", []):
         rec = row["recommended_box"]
         all_candidates = row.get("all_box_candidates", []) or []
 
@@ -2301,11 +2829,11 @@ def build_repack_final_plan(
         )
 
     return {
-        "mixed_repack_boxes": [],
+        "mixed_repack_boxes": preallocated_policy_boxes,
         "final_plans": final_plans,
-        "no_box_fit": box_eval_result.get("no_box_fit", []),
-        "unresolved": box_eval_result.get("unresolved", []),
-        "invalid_specs": box_eval_result.get("invalid_specs", []),
+        "no_box_fit": working_box_eval_result.get("no_box_fit", []),
+        "unresolved": working_box_eval_result.get("unresolved", []),
+        "invalid_specs": working_box_eval_result.get("invalid_specs", []),
     }
 
 

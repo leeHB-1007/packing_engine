@@ -46,6 +46,44 @@ TEST_ORDERS = {
             "check_point": "상품코드 EXACT_CODE 매칭이 되어야 함",
         },
     },
+    "case_15_policy_preallocation_then_mix": {
+        "description": "300개 정책 선배정 후 남은 수량 혼합 재포장",
+        "ship_type": "repack",
+        "packing_list": "no",
+        "orders": [
+            {"product_name": "엘라스티 D 플러스(1syr)", "qty": 400},
+            {"product_name": "리체스 딥 리도(C)", "qty": 100},
+            {"product_name": "비에녹스200u", "qty": 100},
+        ],
+        "expected": {
+            "selected_engine": "run_packing_engine",
+            "formatted_contains": [
+                "엘라스티 D 플러스(1syr) / 72x48x40 / 300ea",
+                "정책 우선 포장",
+                "리체스 딥 리도(C) / 65x45x40",
+                "비에녹스200u / 65x45x40 / 10package(100ea)",
+            ],
+        },
+    },
+    "case_16_policy_group_mixed_300": {
+        "description": "특정상품 그룹은 서로 혼합해도 300개 정책 박스 우선 배정",
+        "ship_type": "repack",
+        "packing_list": "no",
+        "orders": [
+            {"product_name": "리플렌젠 딥", "qty": 400},
+            {"product_name": "리체스 딥 리도(C)", "qty": 200},
+            {"product_name": "셀로좀 미드 리도", "qty": 500},
+        ],
+        "expected": {
+            "selected_engine": "run_packing_engine",
+            "formatted_contains": [
+                "총 박스수: 4박스",
+                "셀로좀 미드 리도 / 72x48x40 / 300ea / 20.2 kg / 정책 우선 포장",
+                "리플렌젠 딥 / 72x48x40 / 300ea / 17.8 kg / 정책 우선 포장",
+                "리체스 딥 리도(C) / 72x48x40 / 200ea / 18.4 kg / 정책 우선 포장",
+            ],
+        },
+    },
 }
 
 

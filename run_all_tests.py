@@ -10,6 +10,7 @@ def evaluate_case(case_name, final_result):
     expected = TEST_ORDERS[case_name].get("expected", {})
     selected_engine = final_result.get("selected_engine")
     result = final_result.get("result", {})
+    result_text = stringify_result(result)
 
     pass_reasons = []
     fail_reasons = []
@@ -59,11 +60,17 @@ def evaluate_case(case_name, final_result):
     # 3) 체크포인트
     check_point = expected.get("check_point")
     if check_point:
-        result_text = stringify_result(result)
         if check_point in result_text:
             pass_reasons.append(f"check_point OK: {check_point}")
         else:
             pass_reasons.append(f"check_point 참고: {check_point}")
+
+    formatted_contains = expected.get("formatted_contains") or []
+    for snippet in formatted_contains:
+        if snippet in result_text:
+            pass_reasons.append(f"formatted_contains OK: {snippet}")
+        else:
+            fail_reasons.append(f"expected formatted text to contain: {snippet}")
 
     is_pass = len(fail_reasons) == 0
     return {
